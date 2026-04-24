@@ -1,0 +1,34 @@
+[project]
+name = "t-trader"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "PyDevill",email = "delphadyth@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "t-tech-investments (>=0.3.5,<0.4.0)",
+    "dotenv (>=0.9.9,<0.10.0)",
+    "rich (>=15.0.0,<16.0.0)",
+    "pytest (>=9.0.3,<10.0.0)",
+    "coverage (>=7.13.5,<8.0.0)",
+    "pytest-cov (>=7.1.0,<8.0.0)",
+    "pytest-asyncio (>=1.3.0,<2.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "t_trader", from = "src"}]
+
+
+[[tool.poetry.source]]
+name = "tbank"
+url = "https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple"
+priority = "supplemental"
+
+
+[tool.poetry.dependencies]
+t-tech-investments = {source = "tbank"}
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
