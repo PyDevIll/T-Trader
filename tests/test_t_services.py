@@ -14,19 +14,22 @@ from t_tech.invest.utils import (
 from t_tech.invest import (
 	CandleInterval, 
 	InstrumentIdType,
-	Quotation
+	Quotation,
 )
 from t_tech.invest.sandbox.async_client import AsyncSandboxClient
 from t_tech.invest.sandbox.client import SandboxClient
-from t_tech.invest.schemas import CandleSource, InstrumentStatus, OperationType
+from t_tech.invest.schemas import (
+	CandleSource,
+	InstrumentStatus,
+	OperationType,
+)
 import json
 
 from src.t_trader.t_services import (
-	get_account,
-	pay_in,
-	get_balance,
-	instruments_by_filter
+	instruments_by_filter,
+	TInvest_async_client
 )
+from rich import print, inspect
 
 # _________________________________________________
 
@@ -43,30 +46,34 @@ async def client():
 		yield client
 
 
-@pytest_asyncio.fixture
-async def account(client):
-	return await get_account(client)
+# @pytest_asyncio.fixture
+# async def account(client):
+# 	return await get_account(client)
 
 # _________________________________________________
 
-@pytest.mark.asyncio
-async def test_account_pay_in(client, account):
-	assert account
-	prev_balance = await get_balance(client, account.id)
-	new_balance = (await pay_in(client, account.id, "100.01")).balance
-	new_balance = money_to_decimal(new_balance)
-	print(f"prev_balance: {prev_balance}; new balance: {new_balance}")
-	assert (new_balance - prev_balance) == Decimal("100.01")
+# @pytest.mark.asyncio
+# async def test_account_pay_in(client, account):
+# 	assert account
+# 	prev_balance = await get_balance(client, account.id)
+# 	new_balance = (await pay_in(client, account.id, "100.01")).balance
+# 	new_balance = money_to_decimal(new_balance)
+# 	print(f"prev_balance: {prev_balance}; new balance: {new_balance}")
+# 	assert (new_balance - prev_balance) == Decimal("100.01")
 
 
-@pytest.mark.asyncio
-async def test_account_operations(client, account):
-	assert account
+# @pytest.mark.asyncio
+# async def test_account_operations(client, account):
+# 	assert account
 
-	operations = (await client.sandbox.get_sandbox_operations(account_id=account.id)).operations
-	assert operations
-	for op in operations:
-		print(f"{op.operation_type.name};  {op.type}; {money_to_decimal(op.payment)}; {money_to_decimal(op.price)}")
+# 	operations = (await client.sandbox.get_sandbox_operations(account_id=account.id)).operations
+# 	assert operations
+# 	inspect(operations[0])
+# 	for op in operations:
+# 		print(f"{op.operation_type.name};  {op.type}; {money_to_decimal(op.payment)}; {money_to_decimal(op.price)}; {op.date.isoformat()}")
+# 		for tr in op.trades:
+# 			print(f"	[{tr.quantity}; {money_to_decimal(tr.price)}; {tr.date_time.isoformat()}]")
+# 		print("___\n\n")
 
 
 def test_get_instruments():
@@ -88,5 +95,18 @@ def test_get_instruments():
 	for k in etf_by_ticker.keys():
 		print(k, etf_by_ticker[k]["fixed_commission"])
 
-	assert "TGLD@", "SAFE" in etf_by_ticker
+	assert {"TGLD@", "SAFE", "TMON@", "TPAY"}.issubset(set(etf_by_ticker.keys()))
+
+
+@pytest.mark.asyncio
+async def test_TInvest_client(client):
+	t_client = await TInvest_async_client(client).connect()
+
+	prev_balance = await t_client.get_balance()
+	await t_client.pay_in(Decimal("50.05"))
+	new_balance = await t_client.get_balance()
+	assert new_balance - prev_balance == Decimal("50.05")
+
+	operations = await t_client.account_operations()
+	assert operations
 
