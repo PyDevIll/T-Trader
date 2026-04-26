@@ -17,7 +17,8 @@ from t_tech.invest.utils import (
 from t_tech.invest import (
 	CandleInterval, 
 	InstrumentIdType,
-	Quotation
+	Quotation,
+	OrderBookInstrument
 )
 from t_tech.invest.sandbox.async_client import AsyncSandboxClient
 from t_tech.invest.schemas import (
@@ -25,10 +26,12 @@ from t_tech.invest.schemas import (
 	InstrumentStatus,
 	OperationType,
 )
+from t_tech.invest.exceptions import AioRequestError
 import json
 from rich import print, inspect
 from dotenv import load_dotenv
 import os
+from functools import lru_cache
 
 
 def instruments_by_filter(instruments, filter_dict):
@@ -59,28 +62,51 @@ def instruments_by_filter(instruments, filter_dict):
 	return instrument_by_ticker
 
 
+@lru_cache(maxsize=128)
 async def etf_ticker_to_figi(client, ticker):
 	for etf in (await client.instruments.etfs()).instruments:
 		if etf.ticker == ticker:
 			return etf.figi
 
+@lru_cache(maxsize=128)
+async def share_ticker_to_figi(client, ticker):
+	for share in (await client.instruments.shares()).instruments:
+		if share.ticker == ticker:
+			return share.figi
 
-class TInvest_async_client():
+
+class AccountManager():
 	def __init__(self, client):
 		self.client = client
 		self.account = None
 
 
-	async def get_account(self):
-		accounts = await self.client.sandbox.get_sandbox_accounts()
-		if not accounts.accounts:
-			await client.sandbox.open_sandbox_account()
-			accounts = await client.sandbox.get_sandbox_accounts()
-		return accounts.accounts
+	async def open_account(self, name=""):
+		await client.sandbox.open_sandbox_account(name=name)
+
+
+	async def get_account(self, name=""):
+		accounts = (await self.client.sandbox.get_sandbox_accounts()).accounts
+		if not accounts:
+			return None
+
+		if not name:
+			return accounts[0]
+		else:
+			for acc in accounts:
+				if acc.name == name:
+					return acc
+			else:
+				print(f"Account {name} is not found")
+				return None
 
 
 	async def connect(self):
-		self.account = (await self.get_account())[0]
+		if not await self.get_account():
+			await self.open_account("default")
+		self.account = await self.get_account("default")
+		if not self.account:
+			self.account = await self.get_account()
 		return self
 
 
@@ -94,9 +120,8 @@ class TInvest_async_client():
 		return await self.client.sandbox.sandbox_pay_in(account_id=self.account.id, amount=money_amount)
 
 
-	async def account_operations(self):
-		operations = (await self.client.sandbox.get_sandbox_operations(account_id=self.account.id)).operations
-		inspect(operations[0])
+	async def account_operations(self, from_=None, to=None):
+		operations = (await self.client.sandbox.get_sandbox_operations(account_id=self.account.id, from_=from_, to=to)).operations
 		for op in operations:
 			print(f"{op.operation_type.name};  {op.type}; {money_to_decimal(op.payment)}; {money_to_decimal(op.price)}; {op.date.isoformat()}")
 			for tr in op.trades:
@@ -105,13 +130,15 @@ class TInvest_async_client():
 		return operations
 
 
-class Orderbook_monitor():
+class OrderbookMonitor():
 	def __init__(self, client):
 		self.client = client
 		self.instruments = []			# {figi: OrderBookInstrument}
 		self.stream = None
 		self.tracking_values_by_figi = {}		# {figi: {key: value, ...}}
 		self.running_task = None
+		self.stop = False
+		self.show = True
 
 
 	def init_tracking_values(self, figi):
@@ -128,7 +155,7 @@ class Orderbook_monitor():
 		if orderbook_data.limit_down < self.tracking_values_by_figi[figi]["min_limit"]:
 			self.tracking_values_by_figi[figi]["min_limit"] = orderbook_data.limit_down
 
-		print(f"max_limit: {self.tracking_values_by_figi[orderbook_data.figi]["max_limit"]}; min_limit: {self.tracking_values_by_figi[orderbook_data.figi]["min_limit"]}")
+		print(f"max_limit: {self.tracking_values_by_figi[figi]["max_limit"]}; min_limit: {self.tracking_values_by_figi[figi]["min_limit"]}")
 
 
 	def set_instruments(self, figi_list):
@@ -141,39 +168,65 @@ class Orderbook_monitor():
 
 		self.instruments = [
 			OrderBookInstrument(
-				figi=figi,
+				instrument_id=figi,
 				depth=10
 			) for figi in figi_list
 		]
 
-
 	async def monitor(self):
+		retry_count = 0
+		max_retries = 10
+		base_delay = 1
+		max_delay = 60
+		while not self.stop:
+			if retry_count > 0:
+				print(f"Reconnecting try: {retry_count}")
+			try:
+				await self._monitor()
+			except (AioRequestError, asyncio.CancelledError) as e:
+				print(f"Stream interrupted: {e}")
+				delay = min(base_delay * (2 ** retry_count), max_delay)
+				delay += random.uniform(-delay*0.1, delay*0.1)
+				print(f"Waiting before retry: {delay:.2f} sec.")
+				await asyncio.sleep(delay)
+				retry_count += 1
+			else:
+				retry_count = 0
+
+
+	async def _monitor(self):
 		self.stream = self.client.create_market_data_stream()
 		self.stream.order_book.subscribe(self.instruments)
 		try:
 			async for response in self.stream:
-				print(response.orderbook)
-				if response.orderbook:
-					self._track_values(response.orderbook)
-		except asyncio.CancelledError:
+				if not self.stop:
+					print(response.orderbook)
+					if response.orderbook:
+						self._track_values(response.orderbook)
+		finally:
 			self.stream.stop()
 			print("Stream stopped. OK!")
 
 
 async def orderbook_streaming():
+	"""
+	Don't know how to use orderbook data for trading.
+	Maybe T-Invest plaform didn't implemented functionality for trading directly from orderbook yet
+	"""
 	load_dotenv()
 	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
 		figi = await etf_ticker_to_figi(client, "TMON@")
-		orderbook_monitor = Orderbook_monitor(client)
+		orderbook_monitor = OrderbookMonitor(client)
 		orderbook_monitor.init_tracking_values(figi)
 		orderbook_monitor.set_instruments([figi])
 		orderbook_monitor.running_task = asyncio.create_task(orderbook_monitor.monitor())
 		while True:
 			await asyncio.sleep(1)
 
+
 if __name__ == "__main__":
 	try:
 		asyncio.run(orderbook_streaming())
-	except KeyboardInterrupt:	# not triggered if last task is stopped
+	except KeyboardInterrupt:
 		print("KeyboardInterrupt handled")
 

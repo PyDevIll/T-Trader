@@ -27,9 +27,11 @@ import json
 
 from src.t_trader.t_services import (
 	instruments_by_filter,
-	TInvest_async_client
+	AccountManager,
+	OrderbookMonitor
 )
 from rich import print, inspect
+from datetime import datetime, timedelta
 
 # _________________________________________________
 
@@ -46,40 +48,13 @@ async def client():
 		yield client
 
 
-# @pytest_asyncio.fixture
-# async def account(client):
-# 	return await get_account(client)
-
 # _________________________________________________
-
-# @pytest.mark.asyncio
-# async def test_account_pay_in(client, account):
-# 	assert account
-# 	prev_balance = await get_balance(client, account.id)
-# 	new_balance = (await pay_in(client, account.id, "100.01")).balance
-# 	new_balance = money_to_decimal(new_balance)
-# 	print(f"prev_balance: {prev_balance}; new balance: {new_balance}")
-# 	assert (new_balance - prev_balance) == Decimal("100.01")
-
-
-# @pytest.mark.asyncio
-# async def test_account_operations(client, account):
-# 	assert account
-
-# 	operations = (await client.sandbox.get_sandbox_operations(account_id=account.id)).operations
-# 	assert operations
-# 	inspect(operations[0])
-# 	for op in operations:
-# 		print(f"{op.operation_type.name};  {op.type}; {money_to_decimal(op.payment)}; {money_to_decimal(op.price)}; {op.date.isoformat()}")
-# 		for tr in op.trades:
-# 			print(f"	[{tr.quantity}; {money_to_decimal(tr.price)}; {tr.date_time.isoformat()}]")
-# 		print("___\n\n")
 
 
 def test_get_instruments():
 	import os
 	with SandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
-		etf_list = client.instruments.etfs(instrument_status=InstrumentStatus(2)).instruments
+		etf_list = client.instruments.etfs(instrument_status=InstrumentStatus.INSTRUMENT_STATUS_BASE).instruments
 		etf_by_ticker = instruments_by_filter(etf_list, {
 			"pos": {
 				"currency": "rub",
@@ -99,14 +74,18 @@ def test_get_instruments():
 
 
 @pytest.mark.asyncio
-async def test_TInvest_client(client):
-	t_client = await TInvest_async_client(client).connect()
+async def test_account_manager(client):
+	account_manager = await AccountManager(client).connect()
+	assert account_manager
+	inspect(account_manager.account)
 
-	prev_balance = await t_client.get_balance()
-	await t_client.pay_in(Decimal("50.05"))
-	new_balance = await t_client.get_balance()
-	assert new_balance - prev_balance == Decimal("50.05")
+	fulfil_amount = Decimal("50.05")
+	prev_balance = await account_manager.get_balance()
+	await account_manager.pay_in(fulfil_amount)
+	new_balance = await account_manager.get_balance()
+	assert new_balance - prev_balance == fulfil_amount
 
-	operations = await t_client.account_operations()
+	operations = await account_manager.account_operations(from_=now()-timedelta(days=1))
 	assert operations
+	inspect(operations[0])
 
