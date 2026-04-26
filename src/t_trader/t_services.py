@@ -66,12 +66,14 @@ def instruments_by_filter(instruments, filter_dict):
 async def etf_ticker_to_figi(client, ticker):
 	for etf in (await client.instruments.etfs()).instruments:
 		if etf.ticker == ticker:
+			print(f"For {ticker} figi = {etf.figi}")
 			return etf.figi
 
 @lru_cache(maxsize=128)
 async def share_ticker_to_figi(client, ticker):
 	for share in (await client.instruments.shares()).instruments:
 		if share.ticker == ticker:
+			print(f"For {ticker} figi = {share.figi}")
 			return share.figi
 
 
@@ -130,15 +132,43 @@ class AccountManager():
 		return operations
 
 
-class OrderbookMonitor():
+class StreamMonitor():
 	def __init__(self, client):
 		self.client = client
-		self.instruments = []			# {figi: OrderBookInstrument}
 		self.stream = None
-		self.tracking_values_by_figi = {}		# {figi: {key: value, ...}}
 		self.running_task = None
 		self.stop = False
 		self.show = True
+
+	async def monitor(self):
+		retry_count = 0
+		max_retries = 10
+		base_delay = 1
+		max_delay = 60
+		while not self.stop:
+			if retry_count > 0:
+				print(f"Reconnecting try: {retry_count}")
+			try:
+				await self._monitor()
+			except (AioRequestError, asyncio.CancelledError) as e:
+				print(f"Stream interrupted: {e}")
+				delay = min(base_delay * (2 ** retry_count), max_delay)
+				delay += random.uniform(-delay*0.1, delay*0.1)
+				print(f"Waiting before retry: {delay:.2f} sec.")
+				await asyncio.sleep(delay)
+				retry_count += 1
+			else:
+				retry_count = 0
+
+	async def _monitor(self):
+		...		# abstract
+
+
+class OrderbookMonitor(StreamMonitor):
+	def __init__(self, client):
+		super().__init__(client)
+		self.instruments = []			# {figi: OrderBookInstrument}
+		self.tracking_values_by_figi = {}		# {figi: {key: value, ...}}
 
 
 	def init_tracking_values(self, figi):
@@ -173,26 +203,6 @@ class OrderbookMonitor():
 			) for figi in figi_list
 		]
 
-	async def monitor(self):
-		retry_count = 0
-		max_retries = 10
-		base_delay = 1
-		max_delay = 60
-		while not self.stop:
-			if retry_count > 0:
-				print(f"Reconnecting try: {retry_count}")
-			try:
-				await self._monitor()
-			except (AioRequestError, asyncio.CancelledError) as e:
-				print(f"Stream interrupted: {e}")
-				delay = min(base_delay * (2 ** retry_count), max_delay)
-				delay += random.uniform(-delay*0.1, delay*0.1)
-				print(f"Waiting before retry: {delay:.2f} sec.")
-				await asyncio.sleep(delay)
-				retry_count += 1
-			else:
-				retry_count = 0
-
 
 	async def _monitor(self):
 		self.stream = self.client.create_market_data_stream()
@@ -209,10 +219,6 @@ class OrderbookMonitor():
 
 
 async def orderbook_streaming():
-	"""
-	Don't know how to use orderbook data for trading.
-	Maybe T-Invest plaform didn't implemented functionality for trading directly from orderbook yet
-	"""
 	load_dotenv()
 	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
 		figi = await etf_ticker_to_figi(client, "TMON@")
@@ -230,3 +236,7 @@ if __name__ == "__main__":
 	except KeyboardInterrupt:
 		print("KeyboardInterrupt handled")
 
+"""
+Don't know how to use orderbook data for trading.
+Maybe T-Invest plaform didn't implemented trading directly from orderbook yet
+"""
