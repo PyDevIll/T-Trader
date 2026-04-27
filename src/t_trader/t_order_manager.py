@@ -27,6 +27,7 @@ from t_tech.invest.schemas import (
 	CandleSource,
 	InstrumentStatus,
 	OperationType,
+	TradeInstrument
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
@@ -39,7 +40,8 @@ from t_services import (
 	AccountManager,
 	instruments_by_filter,
 	etf_ticker_to_figi,
-	share_ticker_to_figi
+	share_ticker_to_figi,
+	figi_to_ticker
 )
 from uuid import uuid4 as uuid
 
@@ -73,25 +75,29 @@ class InstrumentMonitor:
 
 		candles = []
 		from_ = now() - candle_interval_to_timedelta(self.candle_interval) * self.period
-		async for candle in self.client.get_all_candles(
-			figi=self.figi,
+		candles = (await self.client.market_data.get_candles(
+			instrument_id=self.figi,
 			from_=from_,
-			interval=self.candle_interval
-		):
-			candles.append(candle)
+			to=now(),
+			interval=self.candle_interval,
+			candle_source_type=CandleSource.CANDLE_SOURCE_INCLUDE_WEEKEND
+		)).candles
 		# if no enough candles increase from_ until len(candle) = period 
 		while len(candles) < self.period:
-			candles = []
 			from_ -= candle_interval_to_timedelta(self.candle_interval)
 			print(f"Not enough candles for {self.figi} ({len(candles)}). Getting candles from {from_}")
-			async for candle in self.client.get_all_candles(
-				figi=self.figi,
+			candles = (await self.client.market_data.get_candles(
+				instrument_id=self.figi,
 				from_=from_,
-				interval=self.candle_interval
-			):
-				candles.append(candle)
+				to=now(),
+				interval=self.candle_interval,
+				candle_source_type=CandleSource.CANDLE_SOURCE_INCLUDE_WEEKEND
+			)).candles
 
 		self.candle_history = candles
+		print(f"{figi_to_ticker[self.figi]}: {quotation_to_decimal(self.candle_history[-1].close)}")
+		# calculate MA
+		...
 		return True
 
 
@@ -122,6 +128,7 @@ class OrderMonitor(StreamMonitor):
 		self.running_task = None
 		...
 
+
 	def add_instrument(self, instrument_monitor):
 		self.instrument_list_by_figi[instrument_monitor.figi] = instrument_monitor
 
@@ -132,24 +139,37 @@ class OrderMonitor(StreamMonitor):
 		statuses = await self.client.market_data.get_trading_statuses(instrument_ids=figis)
 		for status in statuses.trading_statuses:
 			self.instrument_list_by_figi[status.figi].is_trading = status.trading_status in wanted_status
-			print(f"Trading status of {status.figi} is {status.trading_status.name}. Tradable = {self.instrument_list_by_figi[status.figi].is_trading}")
+			print(f"Trading status of {figi_to_ticker[status.figi]} is {status.trading_status.name}. Tradable = {self.instrument_list_by_figi[status.figi].is_trading}")
 		...
+
 
 	async def move_orders(self):
 		for figi, i in self.instrument_list_by_figi.items():
 			...
 
+
 	async def update_instruments(self):
 		for figi, i in self.instrument_list_by_figi.items():
 			await i.update_candles()
-			if i.is_trading:
-				print(f"{figi}:")
-				print(i.candle_history[-1].close)
 		print("\n____\n\n")
 
 
 	async def _monitor(self):
-		...
+		self.stream = self.client.create_market_data_stream()
+		trade_instruments = [TradeInstrument(instrument_id=figi) for figi in self.instrument_list_by_figi.keys()]
+		self.stream.trades.subscribe(trade_instruments)
+		try:
+			# first response returns value "SubscribeTradesResponse(..)"
+			async for r in self.stream:
+				if not self.stop:
+					if r.trade:
+						print(f"{figi_to_ticker[r.trade.figi]}: price = {quotation_to_decimal(r.trade.price)} x {r.trade.quantity} ({r.trade.direction.name})")
+						await self.instrument_list_by_figi[r.trade.figi].update_candles()	# update in candles stream?
+						print("\n____\n\n")
+		finally:
+			self.stream.stop()
+			self.stop = True
+			print("Stream stopped. OK!")
 
 
 async def test_order_monitor():
@@ -181,17 +201,22 @@ async def test_order_monitor():
 			)
 		)
 		await order_monitor.check_trading_statuses()
+		order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
 		while True:
-			await order_monitor.update_instruments()
 			await asyncio.sleep(1)
-		...
+
 
 if __name__ == "__main__":
-	asyncio.run(test_order_monitor())
-
+	try:
+		asyncio.run(test_order_monitor())
+	except KeyboardInterrupt:
+		print("KeyboardInterrupt handled")
 
 """
 Currently moving stops are the only way to handle market spikes.
 But there's no guarantee that such limit orders will fire.
+
+28.04.2026
+Candles are updated later, after of trade moment. How to use trade events in trading?
 
 """

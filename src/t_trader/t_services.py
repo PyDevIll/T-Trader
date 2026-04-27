@@ -32,6 +32,7 @@ from rich import print, inspect
 from dotenv import load_dotenv
 import os
 from functools import lru_cache
+import random
 
 
 def instruments_by_filter(instruments, filter_dict):
@@ -61,19 +62,34 @@ def instruments_by_filter(instruments, filter_dict):
 			}
 	return instrument_by_ticker
 
+ticker_to_figi = {}
+figi_to_ticker = {}
 
-@lru_cache(maxsize=128)
 async def etf_ticker_to_figi(client, ticker):
+	global ticker_to_figi
+	global figi_to_ticker
+	if ticker in ticker_to_figi:
+		return ticker_to_figi[ticker]
+
 	for etf in (await client.instruments.etfs()).instruments:
 		if etf.ticker == ticker:
 			print(f"For {ticker} figi = {etf.figi}")
+			ticker_to_figi[ticker] = etf.figi
+			figi_to_ticker[etf.figi] = ticker
 			return etf.figi
 
-@lru_cache(maxsize=128)
+
 async def share_ticker_to_figi(client, ticker):
+	global ticker_to_figi
+	global figi_to_ticker
+	if ticker in ticker_to_figi:
+		return ticker_to_figi[ticker]
+
 	for share in (await client.instruments.shares()).instruments:
 		if share.ticker == ticker:
 			print(f"For {ticker} figi = {share.figi}")
+			ticker_to_figi[ticker] = share.figi
+			figi_to_ticker[share.figi] = ticker
 			return share.figi
 
 
@@ -150,7 +166,7 @@ class StreamMonitor():
 				print(f"Reconnecting try: {retry_count}")
 			try:
 				await self._monitor()
-			except (AioRequestError, asyncio.CancelledError) as e:
+			except (AioRequestError, asyncio.exceptions.CancelledError) as e:
 				print(f"Stream interrupted: {e}")
 				delay = min(base_delay * (2 ** retry_count), max_delay)
 				delay += random.uniform(-delay*0.1, delay*0.1)
