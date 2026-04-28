@@ -27,7 +27,8 @@ from t_tech.invest.schemas import (
 	CandleSource,
 	InstrumentStatus,
 	OperationType,
-	TradeInstrument
+	TradeInstrument,
+	CandleInstrument
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
@@ -40,9 +41,9 @@ from t_services import (
 	AccountManager,
 	instruments_by_filter,
 	etf_ticker_to_figi,
-	share_ticker_to_figi,
-	figi_to_ticker
+	share_ticker_to_figi
 )
+from t_services import ticker_figi_cache as ticker_figi
 from uuid import uuid4 as uuid
 
 
@@ -50,7 +51,7 @@ def MA(period, candle_history):
 	if len(candle_history) < period:
 		return None
 	else:
-		value = reduce(lambda a, v: a + v, [c.close for c in candle_history[-period:]]) / period
+		value = reduce(lambda a, v: a + v, [quotation_to_decimal(c.close) for c in candle_history[-period:]]) / period
 		return value
 
 
@@ -95,9 +96,9 @@ class InstrumentMonitor:
 			)).candles
 
 		self.candle_history = candles
-		print(f"{figi_to_ticker[self.figi]}: {quotation_to_decimal(self.candle_history[-1].close)}")
-		# calculate MA
-		...
+		self.ma = MA(self.period, self.candle_history)
+		print(f"{ticker_figi.ticker(self.figi)}: {quotation_to_decimal(self.candle_history[-1].close)}")
+		print(f"MA({self.period}) = {self.ma}")
 		return True
 
 
@@ -139,13 +140,17 @@ class OrderMonitor(StreamMonitor):
 		statuses = await self.client.market_data.get_trading_statuses(instrument_ids=figis)
 		for status in statuses.trading_statuses:
 			self.instrument_list_by_figi[status.figi].is_trading = status.trading_status in wanted_status
-			print(f"Trading status of {figi_to_ticker[status.figi]} is {status.trading_status.name}. Tradable = {self.instrument_list_by_figi[status.figi].is_trading}")
+			print(f"Trading status of {ticker_figi.ticker(status.figi)} is {status.trading_status.name}. Tradable = {self.instrument_list_by_figi[status.figi].is_trading}")
 		...
 
 
 	async def move_orders(self):
 		for figi, i in self.instrument_list_by_figi.items():
 			...
+
+
+	async def process_stream_response(self):
+		...
 
 
 	async def update_instruments(self):
@@ -157,15 +162,26 @@ class OrderMonitor(StreamMonitor):
 	async def _monitor(self):
 		self.stream = self.client.create_market_data_stream()
 		trade_instruments = [TradeInstrument(instrument_id=figi) for figi in self.instrument_list_by_figi.keys()]
+		candle_instruments = [CandleInstrument(instrument_id=figi, interval=i.candle_interval) for figi, i in self.instrument_list_by_figi.items()]
+
 		self.stream.trades.subscribe(trade_instruments)
+		self.stream.last_price.subscribe(trade_instruments)
+		self.stream.candles.waiting_close(enabled=True).subscribe(candle_instruments)	# cannot specify candle_source_type=CandleSource.CANDLE_SOURCE_INCLUDE_WEEKEND
 		try:
 			# first response returns value "SubscribeTradesResponse(..)"
 			async for r in self.stream:
 				if not self.stop:
 					if r.trade:
-						print(f"{figi_to_ticker[r.trade.figi]}: price = {quotation_to_decimal(r.trade.price)} x {r.trade.quantity} ({r.trade.direction.name})")
-						await self.instrument_list_by_figi[r.trade.figi].update_candles()	# update in candles stream?
-						print("\n____\n\n")
+						print(f"{ticker_figi.ticker(r.trade.figi)}:      trade = {quotation_to_decimal(r.trade.price)} x {r.trade.quantity} ({r.trade.direction.name})")
+						await self.process_stream_response()
+					if r.last_price:
+						print(f"{ticker_figi.ticker(r.last_price.figi)}: last price = {quotation_to_decimal(r.last_price.price)}")
+						await self.process_stream_response()
+					if r.candle:
+						print(f"{ticker_figi.ticker(r.candle.figi)} has finished candle ({r.candle.interval.name})")
+						# just append?   won't work for weekends?
+						await self.instrument_list_by_figi[r.candle.figi].update_candles()
+
 		finally:
 			self.stream.stop()
 			self.stop = True
@@ -201,12 +217,14 @@ async def test_order_monitor():
 			)
 		)
 		await order_monitor.check_trading_statuses()
+		await order_monitor.update_instruments()
 		order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
 		while True:
 			await asyncio.sleep(1)
 
 
 if __name__ == "__main__":
+	ticker_figi.init()
 	try:
 		asyncio.run(test_order_monitor())
 	except KeyboardInterrupt:

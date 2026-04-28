@@ -1,0 +1,1 @@
+{"ticker_to_figi": {"TMON@": "TCS70A106DL2", "SAFE": "TCS10A1035N9", "SBER": "BBG004730N88"}, "figi_to_ticker": {"TCS70A106DL2": "TMON@", "TCS10A1035N9": "SAFE", "BBG004730N88": "SBER"}}

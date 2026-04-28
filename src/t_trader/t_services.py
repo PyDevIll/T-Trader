@@ -31,7 +31,6 @@ import json
 from rich import print, inspect
 from dotenv import load_dotenv
 import os
-from functools import lru_cache
 import random
 
 
@@ -62,34 +61,64 @@ def instruments_by_filter(instruments, filter_dict):
 			}
 	return instrument_by_ticker
 
-ticker_to_figi = {}
-figi_to_ticker = {}
+class ticker_figi_cache():
+	_ticker_to_figi = {}
+	_figi_to_ticker = {}
+
+	@classmethod
+	def init(cls):
+		try:
+			with open('ticker_figi_cache.txt', 'r') as f:
+				cache = json.load(f)
+		except:
+			return
+		else:
+			cls._ticker_to_figi = cache["ticker_to_figi"]
+			cls._figi_to_ticker = cache["figi_to_ticker"]
+
+	@classmethod
+	def save(cls):
+		# recording duplicated data. list of single ticker:figi pairs is enough
+		with open('ticker_figi_cache.txt', 'w') as f:
+			json.dump({
+				'ticker_to_figi': cls._ticker_to_figi,
+				'figi_to_ticker': cls._figi_to_ticker
+			}, f)
+
+	@classmethod
+	def figi(cls, ticker):
+		return cls._ticker_to_figi[ticker] if ticker in cls._ticker_to_figi else None
+
+	@classmethod
+	def ticker(cls, figi):
+		return cls._figi_to_ticker[figi] if figi in cls._figi_to_ticker else None
+
+	@classmethod
+	def update(cls, ticker, figi):
+		cls._ticker_to_figi[ticker] = figi
+		cls._figi_to_ticker[figi] = ticker
+		cls.save()
+
 
 async def etf_ticker_to_figi(client, ticker):
-	global ticker_to_figi
-	global figi_to_ticker
-	if ticker in ticker_to_figi:
-		return ticker_to_figi[ticker]
+	if figi:=ticker_figi_cache.figi(ticker):
+		return figi
 
 	for etf in (await client.instruments.etfs()).instruments:
 		if etf.ticker == ticker:
 			print(f"For {ticker} figi = {etf.figi}")
-			ticker_to_figi[ticker] = etf.figi
-			figi_to_ticker[etf.figi] = ticker
+			ticker_figi_cache.update(ticker, etf.figi)
 			return etf.figi
 
 
 async def share_ticker_to_figi(client, ticker):
-	global ticker_to_figi
-	global figi_to_ticker
-	if ticker in ticker_to_figi:
-		return ticker_to_figi[ticker]
+	if figi:=ticker_figi_cache.figi(ticker):
+		return figi
 
 	for share in (await client.instruments.shares()).instruments:
 		if share.ticker == ticker:
 			print(f"For {ticker} figi = {share.figi}")
-			ticker_to_figi[ticker] = share.figi
-			figi_to_ticker[share.figi] = ticker
+			ticker_figi_cache.update(ticker, share.figi)
 			return share.figi
 
 
