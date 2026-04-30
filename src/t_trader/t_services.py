@@ -129,7 +129,7 @@ class AccountManager():
 
 
 	async def open_account(self, name=""):
-		await client.sandbox.open_sandbox_account(name=name)
+		await self.client.sandbox.open_sandbox_account(name=name)
 
 
 	async def get_account(self, name=""):
@@ -149,11 +149,12 @@ class AccountManager():
 
 
 	async def connect(self):
-		if not await self.get_account():
+		default_account = await self.get_account("default")
+		if not default_account:
 			await self.open_account("default")
-		self.account = await self.get_account("default")
-		if not self.account:
-			self.account = await self.get_account()
+			default_account = await self.get_account("default")
+
+		self.account = default_account
 		return self
 
 
@@ -204,6 +205,7 @@ class StreamMonitor():
 				retry_count += 1
 			else:
 				retry_count = 0
+		print("Stream ended by setting stop flag")
 
 	async def _monitor(self):
 		...		# abstract
