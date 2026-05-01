@@ -25,6 +25,8 @@ from t_tech.invest.schemas import (
 	CandleSource,
 	InstrumentStatus,
 	OperationType,
+	GetAccountValuesRequest,
+	AccountValue,
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
@@ -159,7 +161,17 @@ class AccountManager():
 
 
 	async def get_balance(self):
-		balance = (await self.client.sandbox.get_sandbox_portfolio(account_id=self.account.id)).total_amount_portfolio 
+		# doesn't work properly on sandbox accounts
+		# # account_values = (
+		# # 	await self.client.users.get_account_values(
+		# # 		GetAccountValuesRequest(
+		# # 			accounts=[self.account.id],
+		# # 			values=[AccountValue.ACCOUNT_VALUE_AMOUNT_WITHOUT_EXTRA_FEE]
+		# # 		)
+		# # 	)
+		# # ).values
+		balance_response = await self.client.sandbox.get_sandbox_withdraw_limits(account_id=self.account.id)
+		balance = balance_response.money[0]
 		return money_to_decimal(balance)
 
 

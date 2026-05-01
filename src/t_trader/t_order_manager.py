@@ -3,7 +3,7 @@
 import t_services
 import asyncio
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from decimal import Decimal
 
 from t_tech.invest.async_services import AsyncServices
@@ -38,7 +38,8 @@ from t_tech.invest.schemas import (
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
-from rich import print, inspect
+from rich import inspect, print
+from rich.prompt import Prompt
 from dotenv import load_dotenv
 import os
 from functools import lru_cache, reduce
@@ -52,6 +53,12 @@ from t_services import (
 from t_services import ticker_figi_cache as ticker_figi
 from uuid import uuid4 as uuid
 import signal
+
+def signal_time_up(num, frame):
+	raise TimeoutError("Time is up")
+
+signal.signal(signal.SIGALRM, signal_time_up)
+
 
 def MA(period, candle_history):
 	if len(candle_history) < period:
@@ -125,15 +132,16 @@ class InstrumentMonitor:
 
 
 class OrderManager:
-	def __init__(self, client, account_id):
-		self.account_id = account_id
+	def __init__(self, client, account_manager):
+		self.account_manager = account_manager
+		self.account_id = account_manager.account.id
 		self.client = client
 
 	async def _post_order(self, figi, price, order_type, order_direction, lots=1):
 		order_id = str(uuid())
-		print(f"Posting order (id = {order_id}; {args})")
+		print(f"Posting order {self.account_id} ({locals()})")
 		try:
-			order_result = self.client.post_sandbox_order(
+			order_result = await self.client.sandbox.post_sandbox_order(
 				figi=figi,
 				quantity=lots,
 				price=price,
@@ -141,11 +149,15 @@ class OrderManager:
 				account_id=self.account_id,
 				order_type=order_type,
 				order_id=order_id,
-				timeInForce=TimeInForceType.TIME_IN_FORCE_FILL_AND_KILL,
-				confirmMarginTrade=True
+				time_in_force=TimeInForceType.TIME_IN_FORCE_FILL_AND_KILL
+				# confirm_margin_trade=True
 			)
-		except Exception as e:
-			print(f"Cannot post order: {e}")
+		except AioRequestError as e:
+			print(f"Cannot post order: {e.metadata.message}")
+			return False
+
+		inspect(order_result)
+		input()
 		if order_result.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
 			print("Success!")
 			return order_result.order_id
@@ -163,7 +175,7 @@ class OrderManager:
 
 
 	async def list_orders(self):
-		order_list_response = await client.sandbox.get_sandbox_orders(account_id=self.account_id)
+		order_list_response = await self.client.sandbox.get_sandbox_orders(account_id=self.account_id)
 		for order in order_list_response.orders:
 			print(f"{ticker_figi.ticker(order.figi)}: {order.order_type.name} ,{order.direction.name} at {money_to_decimal(order.initial_order_price)} x {order.lots_requested}")
 			print(f"\t\t Execution status: {order.execution_report_status.name}: {money_to_decimal(order.executed_order_price)} x {order.lots_executed}")
@@ -175,7 +187,7 @@ class OrderManager:
 		figi = instrument_monitor.figi
 		price = instrument_monitor.bid
 		lots = instrument_monitor.lots
-		print(f"BUY {ticker_figi.ticker(figi)} for {Decimal(price)}")
+		print(f"BUY {ticker_figi.ticker(figi)} for {quotation_to_decimal(price)}")
 		order_id = await self._post_order(figi, price, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
 		if order_id:
 			return order_id
@@ -184,7 +196,7 @@ class OrderManager:
 	async def buylimit(self, instrument_monitor, price):
 		figi = instrument_monitor.figi
 		lots = instrument_monitor.lots
-		print(f"BUY STOP {ticker_figi.ticker(figi)} at {Decimal(price)}")
+		print(f"BUY STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price)}")
 		order_id = await self._post_order(figi, price, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_BUY, lots)
 		if order_id:
 			return order_id
@@ -194,7 +206,7 @@ class OrderManager:
 		figi = instrument_monitor.figi
 		price = instrument_monitor.ask 	# sell price /= buy price. should I get them for orderbook's bid/ask to be sure?
 		lots = instrument_monitor.lots
-		print(f"SELL {ticker_figi.ticker(figi)} for {Decimal(price)}")
+		print(f"SELL {ticker_figi.ticker(figi)} for {quotation_to_decimal(price)}")
 		order_id = await self._post_order(figi, price, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
 		if order_id:
 			return order_id
@@ -203,7 +215,7 @@ class OrderManager:
 	async def selllimit(self, instrument_monitor, price):
 		figi = instrument_monitor.figi
 		lots = instrument_monitor.lots
-		print(f"SELL STOP {ticker_figi.ticker(figi)} at {Decimal(price)}")
+		print(f"SELL STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price)}")
 		order_id = await self._post_order(figi, price, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_SELL, lots)
 		if order_id:
 			return order_id
@@ -215,6 +227,7 @@ class OrderMonitor(StreamMonitor):
 		self.instrument_list_by_figi = {}	# {figi: InstrumentMonitor}
 		self.running_task = None
 		self.order_manager = order_manager
+		self.account_manager = order_manager.account_manager
 		...
 
 
@@ -237,9 +250,6 @@ class OrderMonitor(StreamMonitor):
 			...
 
 	async def request_action(self, market_response):
-		def signal_timeout(num, frame):
-			raise TimeoutError("Time is up")
-
 		try:
 			figi = (market_response.orderbook or market_response.last_price or market_response.candle).figi
 		except:
@@ -248,11 +258,14 @@ class OrderMonitor(StreamMonitor):
 			input()
 
 		user_input = None
-		signal.signal(signal.SIGALRM, signal_timeout)
 		signal.alarm(1)
 		print("Choose an operation")
 		try:
-			user_input = input(f"Operation on {ticker_figi.ticker(figi)} (b - BUY, s - SELL):")
+			user_input = Prompt.ask(
+				f"[bold green]{ticker_figi.ticker(figi)}[/]: [bold]b[/] - BUY, [bold]s[/] - SELL; " +
+				f"[bold]General[/]: [bold]l[/] - LIST ORDERS, [bold]p[/] - PAY IN, " +
+				f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS"
+			)
 			signal.alarm(0)
 		except TimeoutError as e:
 			print(e)
@@ -262,12 +275,20 @@ class OrderMonitor(StreamMonitor):
 			if user_input == 'b':
 				print(f'BUYING {ticker_figi.ticker(figi)}')
 				await self.order_manager.buy(self.instrument_list_by_figi[figi])
-			if user_input == 's':
+			elif user_input == 's':
 				print(f'SELLING {ticker_figi.ticker(figi)}')
 				await self.order_manager.sell(self.instrument_list_by_figi[figi])
-			if user_input == 'l':
+			elif user_input == 'l':
 				print('LISTING ORDERS:')
 				await self.order_manager.list_orders()
+			elif user_input == 'p':
+				amount = Decimal(Prompt.ask("Pay in amount (10000)", default="10000"))
+				await self.account_manager.pay_in(amount)
+				print(await self.account_manager.get_balance())
+			elif user_input == 'o':
+				await self.account_manager.account_operations(from_= datetime.combine(now(), time.min))
+			elif user_input == 'a':
+				print(await self.account_manager.get_balance())
 			print("___\n")
 		else:
 			print("No operation selected")
@@ -324,7 +345,7 @@ class OrderMonitor(StreamMonitor):
 		finally:
 			self.stream.stop()
 			self.stop = True
-			print("Stream stopped. OK!")
+			print(f"Stream stopped. OK! (OrderMonitor)")
 
 
 async def test_order_manager():
@@ -341,7 +362,7 @@ async def test_order_monitor():
 	load_dotenv()
 	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
 		account_manager = await AccountManager(client).connect()
-		order_manager = OrderManager(client, account_manager.account)
+		order_manager = OrderManager(client, account_manager)
 		order_monitor = OrderMonitor(client, order_manager)
 		order_monitor.add_instrument(
 			InstrumentMonitor(
