@@ -52,7 +52,7 @@ from t_services import (
 	share_ticker_to_figi
 )
 from t_services import ticker_figi_cache as ticker_figi
-from uuid import uuid4 as uuid
+import uuid
 import signal
 
 def signal_time_up(num, frame):
@@ -82,8 +82,8 @@ class InstrumentMonitor:
 		self.period = period	# period = candle_count
 		self.candle_history = []
 		self.min_price_increment = None
-		self.ma = 0
-		self.deviation_percent = 0.1
+		self.ma = Decimal(0)
+		self.deviation_percent = Decimal(0.1)
 		self.lots = lots
 		self.hi_order = None
 		self.lo_order = None
@@ -132,6 +132,13 @@ class InstrumentMonitor:
 		print(f"Limit up/down = {quotation_to_decimal(self.limit_up)} / {quotation_to_decimal(self.limit_down)}")
 
 
+	def quantize(self, price_decimal):
+		quantized_price_decimal = (price_decimal // quotation_to_decimal(self.min_price_increment)) * quotation_to_decimal(self.min_price_increment)
+		quantized_price_decimal = Quotation(0, int(quantized_price_decimal * 1_000_000_000))
+		print(f"Before quantizing: {price_decimal} / after: {quantized_price_decimal}")
+		return quantized_price_decimal
+
+
 class OrderManager:
 	def __init__(self, client, account_manager):
 		self.account_manager = account_manager
@@ -139,7 +146,7 @@ class OrderManager:
 		self.client = client
 
 	async def _post_order(self, figi, price, order_type, order_direction, lots=1):
-		order_id = str(uuid())
+		order_id = str(uuid.uuid4())
 		print(f"Posting order {self.account_id} ({locals()})")
 		try:
 			order_result = await self.client.sandbox.post_sandbox_order(
@@ -147,20 +154,19 @@ class OrderManager:
 				quantity=lots,
 				price=price,
 				direction=order_direction,
-				account_id=self.account_id,
+				account_id=str(self.account_id),
 				order_type=order_type,
 				order_id=order_id,
-				time_in_force=TimeInForceType.TIME_IN_FORCE_FILL_AND_KILL
+				# time_in_force=TimeInForceType.TIME_IN_FORCE_FILL_AND_KILL
 				# confirm_margin_trade=True
 			)
 		except AioRequestError as e:
 			print(f"Cannot post order: {e.metadata.message}")
-			return False
 
 		inspect(order_result)
 		input()
 		if order_result.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
-			print("Success!")
+			print(f"Success! ({order_result.execution_report_status})")
 			return order_result.order_id
 		print("Order rejected!")
 		return False	# order rejected
@@ -175,6 +181,7 @@ class OrderManager:
 		...
 
 
+
 	async def list_orders(self):
 		order_list_response = await self.client.sandbox.get_sandbox_orders(account_id=self.account_id)
 		for order in order_list_response.orders:
@@ -182,7 +189,8 @@ class OrderManager:
 			print(f"\t\t Execution status: {order.execution_report_status.name}: {money_to_decimal(order.executed_order_price)} x {order.lots_executed}")
 			print(f"\t\t Commission: {money_to_decimal(order.executed_commission)} + {money_to_decimal(order.service_commission)}")
 			print("___\n")
-		...
+		return order_list_response.orders
+
 
 	async def buy(self, instrument_monitor):
 		figi = instrument_monitor.figi
@@ -198,6 +206,10 @@ class OrderManager:
 		figi = instrument_monitor.figi
 		lots = instrument_monitor.lots
 		print(f"BUY STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price)}")
+		if price < instrument_monitor.limit_down:
+			price = instrument_monitor.limit_down + instrument_monitor.min_price_increment
+			print(f"Price corrected to limit_down: {price}")
+
 		order_id = await self._post_order(figi, price, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_BUY, lots)
 		if order_id:
 			return order_id
@@ -217,6 +229,9 @@ class OrderManager:
 		figi = instrument_monitor.figi
 		lots = instrument_monitor.lots
 		print(f"SELL STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price)}")
+		if price > instrument_monitor.limit_up:
+			price = instrument_monitor.limit_up - instrument_monitor.min_price_increment
+			print(f"Price corrected to limit_up: {price}")
 		order_id = await self._post_order(figi, price, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_SELL, lots)
 		if order_id:
 			return order_id
@@ -243,11 +258,27 @@ class OrderMonitor(StreamMonitor):
 		for status in statuses.trading_statuses:
 			self.instrument_list_by_figi[status.figi].is_trading = status.trading_status in wanted_status
 			print(f"Trading status of {ticker_figi.ticker(status.figi)} is {status.trading_status.name}. Tradable = {self.instrument_list_by_figi[status.figi].is_trading}")
-		...
 
 
-	async def move_orders(self):
-		for figi, i in self.instrument_list_by_figi.items():
+	async def move_orders(self, figi):
+		i = self.instrument_list_by_figi[figi]
+		if not i.is_trading:
+			return
+
+		if not i.hi_order:
+			sell_price = i.quantize(i.ma + i.ma * i.deviation_percent)
+			i.hi_order = await self.order_manager.selllimit(i, sell_price)
+		else:
+			await self.order_manager.check_order(i.hi_order)
+			...
+
+		if not i.lo_order:
+			buy_price = i.quantize(i.ma - i.ma * i.deviation_percent)
+			i.lo_order = await self.order_manager.buylimit(i, buy_price)
+		else:
+			await self.order_manager.check_order(i.lo_order)
+			...
+
 			...
 
 	async def request_action(self, market_response):
@@ -312,6 +343,19 @@ class OrderMonitor(StreamMonitor):
 			i.min_price_increment = broker_instrument.min_price_increment
 			print(f"{ticker_figi.ticker(figi)} min price increment = {quotation_to_decimal(i.min_price_increment)}")
 
+		# get hi/lo orders
+		orders = await self.order_manager.list_orders()
+		for order in orders:
+			# check execution status to be EXECUTION_REPORT_STATUS_NEW
+			if order.order_type == OrderType.ORDER_TYPE_LIMIT:
+				if order.direction == OrderDirection.ORDER_DIRECTION_BUY:
+					self.instrument_list_by_figi[order.figi].lo_order = order.order_id
+					print(f"Got lo_order (BUY) for {ticker_figi.ticker(order.figi)} at {order.initial_order_price} x {order.lots_requested} (id = {order.order_id})")
+				elif order.direction == OrderDirection.ORDER_DIRECTION_SELL:
+					self.instrument_list_by_figi[order.figi].hi_order = order.order_id
+					print(f"Got hi_order (SELL) for {ticker_figi.ticker(order.figi)} at {order.initial_order_price} x {order.lots_requested} (id = {order.order_id})")
+
+		...
 		print("\n____\n\n")
 
 
@@ -326,6 +370,7 @@ class OrderMonitor(StreamMonitor):
 		self.stream.candles.waiting_close(enabled=True).subscribe(candle_instruments)	# cannot specify candle_source_type=CandleSource.CANDLE_SOURCE_INCLUDE_WEEKEND
 		try:
 			# first response returns value "SubscribeTradesResponse(..)"
+			# if no instrument is trading stream stops and never continues?
 			async for r in self.stream:
 				if not self.stop:
 					# if r.trade:
@@ -340,6 +385,8 @@ class OrderMonitor(StreamMonitor):
 						print(f"{ticker_figi.ticker(r.candle.figi)} has finished candle ({r.candle.interval.name})")
 						# just append?   won't work for weekends?
 						await self.instrument_list_by_figi[r.candle.figi].update_candles()
+						await self.move_orders(r.candle.figi)
+
 		# except Exception as e:
 		# 	print(f"Stream interrupted due to error: {e}")
 		finally:
