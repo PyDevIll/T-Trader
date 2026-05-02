@@ -161,15 +161,6 @@ class AccountManager():
 
 
 	async def get_balance(self):
-		# doesn't work properly on sandbox accounts
-		# # account_values = (
-		# # 	await self.client.users.get_account_values(
-		# # 		GetAccountValuesRequest(
-		# # 			accounts=[self.account.id],
-		# # 			values=[AccountValue.ACCOUNT_VALUE_AMOUNT_WITHOUT_EXTRA_FEE]
-		# # 		)
-		# # 	)
-		# # ).values
 		balance_response = await self.client.sandbox.get_sandbox_withdraw_limits(account_id=self.account.id)
 		balance = balance_response.money[0]
 		return money_to_decimal(balance)
@@ -183,11 +174,23 @@ class AccountManager():
 	async def account_operations(self, from_=None, to=None):
 		operations = (await self.client.sandbox.get_sandbox_operations(account_id=self.account.id, from_=from_, to=to)).operations
 		for op in operations:
-			print(f"{op.operation_type.name};  {op.type}; {money_to_decimal(op.payment)}; {money_to_decimal(op.price)}; {op.date.isoformat()}")
+			print(f"{op.operation_type.name};  {op.type}; {money_to_decimal(op.payment):.2f}; {money_to_decimal(op.price):.2f}; {op.date.isoformat()}")
 			for tr in op.trades:
-				print(f"	[{tr.quantity}; {money_to_decimal(tr.price)}; {tr.date_time.isoformat()}]")
+				print(f"	[{tr.quantity}; {money_to_decimal(tr.price):.2f}; {tr.date_time.isoformat()}]")
 			print("___\n\n")
 		return operations
+
+
+	async def get_positions(self):
+		positions = (await self.client.sandbox.get_sandbox_portfolio(account_id=self.account.id)).positions
+		for p in positions:
+			profit = money_to_decimal(p.current_price) - money_to_decimal(p.average_position_price_fifo)
+			green_color = profit >= Decimal(0)
+			print(
+				f"[bold green]{p.ticker}[/] x {quotation_to_decimal(p.quantity):.2f} = {money_to_decimal(p.average_position_price_fifo):.2f} (" +
+				("[green]" if green_color else "[red]") + f"{profit:+.2f}[/] )"
+			)
+		return positions
 
 
 class StreamMonitor():

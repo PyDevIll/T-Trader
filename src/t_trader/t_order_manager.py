@@ -38,6 +38,7 @@ from t_tech.invest.schemas import (
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
+_print = print
 from rich import inspect, print
 from rich.prompt import Prompt
 from dotenv import load_dotenv
@@ -259,39 +260,38 @@ class OrderMonitor(StreamMonitor):
 
 		user_input = None
 		signal.alarm(1)
-		print("Choose an operation")
 		try:
 			user_input = Prompt.ask(
-				f"[bold green]{ticker_figi.ticker(figi)}[/]: [bold]b[/] - BUY, [bold]s[/] - SELL; " +
-				f"[bold]General[/]: [bold]l[/] - LIST ORDERS, [bold]p[/] - PAY IN, " +
-				f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS"
+				f"[white on grey11][bold green]{ticker_figi.ticker(figi)}[/]: [bold]b[/] - BUY, [bold]s[/] - SELL; \t" +
+				f"[bold]General[/]: [bold]l[/] - LIST ORDERS, [bold]+[/] - PAY IN, " +
+				f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS, [bold]p[/] - POSITIONS\r"
 			)
 			signal.alarm(0)
 		except TimeoutError as e:
-			print(e)
-
-		if user_input:
-			print(f"You've entered '{user_input}'")
-			if user_input == 'b':
-				print(f'BUYING {ticker_figi.ticker(figi)}')
-				await self.order_manager.buy(self.instrument_list_by_figi[figi])
-			elif user_input == 's':
-				print(f'SELLING {ticker_figi.ticker(figi)}')
-				await self.order_manager.sell(self.instrument_list_by_figi[figi])
-			elif user_input == 'l':
-				print('LISTING ORDERS:')
-				await self.order_manager.list_orders()
-			elif user_input == 'p':
-				amount = Decimal(Prompt.ask("Pay in amount (10000)", default="10000"))
-				await self.account_manager.pay_in(amount)
-				print(await self.account_manager.get_balance())
-			elif user_input == 'o':
-				await self.account_manager.account_operations(from_= datetime.combine(now(), time.min))
-			elif user_input == 'a':
-				print(await self.account_manager.get_balance())
-			print("___\n")
+			_print("\r" + ("             " * 10), end="\r")
 		else:
-			print("No operation selected")
+			if user_input:
+				print(f"You've entered '{user_input}'")
+				if user_input == 'b':
+					print(f'BUYING {ticker_figi.ticker(figi)}')
+					await self.order_manager.buy(self.instrument_list_by_figi[figi])
+				elif user_input == 's':
+					print(f'SELLING {ticker_figi.ticker(figi)}')
+					await self.order_manager.sell(self.instrument_list_by_figi[figi])
+				elif user_input == 'l':
+					print('LISTING ORDERS:')
+					await self.order_manager.list_orders()
+				elif user_input == '+':
+					amount = Decimal(Prompt.ask("Pay in amount (10000)", default="10000"))
+					await self.account_manager.pay_in(amount)
+					print(await self.account_manager.get_balance())
+				elif user_input == 'o':
+					await self.account_manager.account_operations(from_= datetime.combine(now(), time.min))
+				elif user_input == 'a':
+					print(await self.account_manager.get_balance())
+				elif user_input == 'p':
+					await self.account_manager.get_positions()
+				print("___\n")
 
 
 
