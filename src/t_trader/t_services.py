@@ -63,6 +63,7 @@ def instruments_by_filter(instruments, filter_dict):
 			}
 	return instrument_by_ticker
 
+
 class ticker_figi_cache():
 	_ticker_to_figi = {}
 	_figi_to_ticker = {}
