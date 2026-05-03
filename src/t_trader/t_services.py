@@ -22,11 +22,20 @@ from t_tech.invest import (
 )
 from t_tech.invest.sandbox.async_client import AsyncSandboxClient
 from t_tech.invest.schemas import (
+	CandleInterval,
 	CandleSource,
 	InstrumentStatus,
+	InstrumentIdType,
 	OperationType,
-	GetAccountValuesRequest,
-	AccountValue,
+	TradeInstrument,
+	CandleInstrument,
+	OrderBookInstrument,
+	OrderType,
+	OrderDirection,
+	TimeInForceType,
+	OrderExecutionReportStatus,
+	OrderIdType,
+	ReplaceOrderRequest
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
@@ -34,6 +43,7 @@ from rich import print, inspect
 from dotenv import load_dotenv
 import os
 import random
+import uuid
 
 
 def instruments_by_filter(instruments, filter_dict):
@@ -125,7 +135,8 @@ async def share_ticker_to_figi(client, ticker):
 			return share.figi
 
 
-class AccountManager():
+
+class AccountManagerSandbox():
 	def __init__(self, client):
 		self.client = client
 		self.account = None
@@ -194,6 +205,96 @@ class AccountManager():
 		return positions
 
 
+
+class OrderManagerSandbox:
+	def __init__(self, client, account_manager):
+		self.account_manager = account_manager
+		self.account_id = account_manager.account.id
+		self.client = client
+
+	async def _post_order(self, figi, price, order_type, order_direction, lots=1):
+		order_id = str(uuid.uuid4())
+		print(f"Posting order {self.account_id} ({locals()})")
+		try:
+			post_order_response = await self.client.sandbox.post_sandbox_order(
+				figi=figi,
+				quantity=lots,
+				price=price,
+				direction=order_direction,
+				account_id=self.account_id,
+				order_type=order_type,
+				order_id=order_id,
+				# time_in_force=TimeInForceType.TIME_IN_FORCE_FILL_AND_KILL
+				# confirm_margin_trade=True
+			)
+		except AioRequestError as e:
+			print(f"Cannot post order: {e.metadata.message}")
+
+		inspect(post_order_response)
+		input()
+		if post_order_response.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
+			print(f"Success! ({post_order_response.execution_report_status.name})")
+			return post_order_response.order_id
+		print("Order rejected!")
+		return False	# order rejected
+
+
+	async def change_order(self, order_id, price_quotation, lots):
+		new_order_id = str(uuid.uuid4())
+		try:
+			post_order_response = await self.client.sandbox.replace_sandbox_order(
+				ReplaceOrderRequest(
+					account_id=self.account_id,
+					order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE,
+					order_id=order_id,
+					idempotency_key=new_order_id,
+					quantity=lots,
+					price=price_quotation
+				)
+			)
+		except AioRequestError as e:
+			print(f"Cannot post order: {e.metadata.message}")
+
+		if post_order_response.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
+			print(f"Order changed! ({post_order_response.execution_report_status.name}) New price = {post_order_response.initial_security_price}")
+			return post_order_response.order_id
+		print("Order change rejected!")
+		return False	# order rejected
+
+
+	async def get_order(self, order_id):
+		try:
+			order = await self.client.sandbox.get_sandbox_order_state(
+				account_id = self.account_id,
+				order_id=order_id,
+				order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE
+			)
+		except Exception as e:
+			print(e)
+			return None
+
+		print(f"{ticker_figi_cache.ticker(order.figi)}: {order.order_type.name} ,{order.direction.name} at {money_to_decimal(order.initial_security_price)} x {order.lots_requested}")
+		print(f"\t\t Execution status: {order.execution_report_status.name}: {money_to_decimal(order.executed_order_price)} x {order.lots_executed}")
+		print(f"\t\t Commission: {money_to_decimal(order.executed_commission)} + {money_to_decimal(order.service_commission)}")
+		if order.stages:
+			print(f"\t\t Execution stages:")
+			for num, stage in enumerate(order.stages, start=1):
+				print(f"\t\t\t {num}. {money_to_decimal(stage.price)} x {stage.quantity}")
+		print("___\n")
+		return order
+
+
+	async def list_orders(self):
+		order_list_response = await self.client.sandbox.get_sandbox_orders(account_id=self.account_id)
+		for order in order_list_response.orders:
+			print(f"{ticker_figi_cache.ticker(order.figi)}: {order.order_type.name}, {order.direction.name} at {money_to_decimal(order.initial_security_price)} x {order.lots_requested}")
+			print(f"\t\t Execution status: {order.execution_report_status.name}: {money_to_decimal(order.executed_order_price)} x {order.lots_executed}")
+			print(f"\t\t Commission: {money_to_decimal(order.executed_commission)} + {money_to_decimal(order.service_commission)}")
+			print("___\n")
+		return order_list_response.orders
+
+
+
 class StreamMonitor():
 	def __init__(self, client):
 		self.client = client
@@ -225,6 +326,7 @@ class StreamMonitor():
 
 	async def _monitor(self):
 		...		# abstract
+
 
 
 class OrderbookMonitor(StreamMonitor):
@@ -291,6 +393,7 @@ async def orderbook_streaming():
 		orderbook_monitor.running_task = asyncio.create_task(orderbook_monitor.monitor())
 		while True:
 			await asyncio.sleep(1)
+
 
 
 if __name__ == "__main__":
