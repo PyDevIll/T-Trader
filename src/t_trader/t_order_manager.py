@@ -2,6 +2,7 @@
 
 import t_services
 import asyncio
+import sys
 
 from datetime import datetime, timedelta, time
 from decimal import Decimal
@@ -35,7 +36,8 @@ from t_tech.invest.schemas import (
 	OrderDirection,
 	TimeInForceType,
 	OrderExecutionReportStatus,
-	OrderIdType
+	OrderIdType,
+	ReplaceOrderRequest
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
@@ -177,21 +179,20 @@ class OrderManager:
 		new_order_id = str(uuid.uuid4())
 		try:
 			post_order_response = await self.client.sandbox.replace_sandbox_order(
-				account_id=self.account_id,
-				order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE,
-				order_id=order_id,
-				idempotency_key=new_order_id,
-				quantity=lots,
-				price=price_quotation
+				ReplaceOrderRequest(
+					account_id=self.account_id,
+					order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE,
+					order_id=order_id,
+					idempotency_key=new_order_id,
+					quantity=lots,
+					price=price_quotation
+				)
 			)
 		except AioRequestError as e:
 			print(f"Cannot post order: {e.metadata.message}")
 
-		inspect(post_order_response)
-		input()
-
 		if post_order_response.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
-			print(f"Order changed! ({post_order_response.execution_report_status.name})")
+			print(f"Order changed! ({post_order_response.execution_report_status.name}) New price = {post_order_response.initial_security_price}")
 			return post_order_response.order_id
 		print("Order change rejected!")
 		return False	# order rejected
@@ -209,7 +210,7 @@ class OrderManager:
 			print(e)
 			return None
 
-		print(f"{ticker_figi.ticker(order.figi)}: {order.order_type.name} ,{order.direction.name} at {money_to_decimal(order.initial_order_price)} x {order.lots_requested} ({order.initial_security_price})")
+		print(f"{ticker_figi.ticker(order.figi)}: {order.order_type.name} ,{order.direction.name} at {money_to_decimal(order.initial_security_price)} x {order.lots_requested}")
 		print(f"\t\t Execution status: {order.execution_report_status.name}: {money_to_decimal(order.executed_order_price)} x {order.lots_executed}")
 		print(f"\t\t Commission: {money_to_decimal(order.executed_commission)} + {money_to_decimal(order.service_commission)}")
 		if order.stages:
@@ -220,11 +221,10 @@ class OrderManager:
 		return order
 
 
-
 	async def list_orders(self):
 		order_list_response = await self.client.sandbox.get_sandbox_orders(account_id=self.account_id)
 		for order in order_list_response.orders:
-			print(f"{ticker_figi.ticker(order.figi)}: {order.order_type.name} ,{order.direction.name} at {money_to_decimal(order.initial_order_price)} x {order.lots_requested} ({order.initial_security_price})")
+			print(f"{ticker_figi.ticker(order.figi)}: {order.order_type.name} ,{order.direction.name} at {money_to_decimal(order.initial_security_price)} x {order.lots_requested}")
 			print(f"\t\t Execution status: {order.execution_report_status.name}: {money_to_decimal(order.executed_order_price)} x {order.lots_executed}")
 			print(f"\t\t Commission: {money_to_decimal(order.executed_commission)} + {money_to_decimal(order.service_commission)}")
 			print("___\n")
@@ -247,9 +247,9 @@ class OrderManager:
 		figi = instrument_monitor.figi
 		lots = instrument_monitor.lots
 		print(f"BUY STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price)}")
-		if price < instrument_monitor.limit_down:
-			price = instrument_monitor.limit_down
-			print(f"Price corrected to limit_down: {price}")
+		# if price < instrument_monitor.limit_down:
+		# 	price = instrument_monitor.limit_down
+		# 	print(f"Price corrected to limit_down: {price}")
 
 		order_id = await self._post_order(figi, price, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_BUY, lots)
 		if order_id:
@@ -272,9 +272,9 @@ class OrderManager:
 		figi = instrument_monitor.figi
 		lots = instrument_monitor.lots
 		print(f"SELL STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price)}")
-		if price > instrument_monitor.limit_up:
-			price = instrument_monitor.limit_up
-			print(f"Price corrected to limit_up: {price}")
+		# if price > instrument_monitor.limit_up:
+		# 	price = instrument_monitor.limit_up
+		# 	print(f"Price corrected to limit_up: {price}")
 		order_id = await self._post_order(figi, price, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_SELL, lots)
 		if order_id:
 			return order_id
@@ -287,6 +287,8 @@ class OrderMonitor(StreamMonitor):
 		self.running_task = None
 		self.order_manager = order_manager
 		self.account_manager = order_manager.account_manager
+		self.last_market_response = None
+		self.last_user_input = None
 		...
 
 
@@ -321,7 +323,7 @@ class OrderMonitor(StreamMonitor):
 				print(f" SELL LIMIT order for {ticker_figi.ticker(figi)} price difference = {price_difference}")
 				if price_difference > min_difference:
 					print("Order should be moved...")
-					i.hi_order = await self.order_manager.change_order(i, i.hi_order, sell_quotation, i.lots)
+					i.hi_order = await self.order_manager.change_order(i.hi_order, sell_quotation, i.lots)
 
 		if not i.lo_order:
 			i.lo_order = await self.order_manager.buylimit(i, buy_price)
@@ -330,7 +332,20 @@ class OrderMonitor(StreamMonitor):
 			...
 
 
-	async def request_action(self, market_response):
+	def get_user_input(self):
+		self.last_user_input = sys.stdin.readline().strip()
+
+
+	async def process_user_action(self):
+		user_input = self.last_user_input
+		self.last_user_input = None
+		if not user_input:
+			return
+
+		market_response = self.last_market_response
+		if not market_response:
+			return
+
 		try:
 			figi = (market_response.orderbook or market_response.last_price or market_response.candle).figi
 		except:
@@ -338,45 +353,30 @@ class OrderMonitor(StreamMonitor):
 			inspect(market_response)
 			input()
 
-		user_input = None
-		signal.alarm(1)
-		try:
-			user_input = Prompt.ask(
-				f"[white on grey11][bold green]{ticker_figi.ticker(figi)}[/]: [bold]b[/] - BUY, [bold]s[/] - SELL; \t" +
-				f"[bold]General[/]: [bold]l[/] - LIST ORDERS, [bold]+[/] - PAY IN, " +
-				f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS, [bold]p[/] - POSITIONS\r"
-			)
-			signal.alarm(0)
-		except TimeoutError as e:
-			_print("\r" + ("             " * 10), end="\r")
-		else:
-			if user_input:
-				print(f"You've entered '{user_input}'")
-				if user_input == 'b':
-					print(f'BUYING {ticker_figi.ticker(figi)}')
-					await self.order_manager.buy(self.instrument_list_by_figi[figi])
-				elif user_input == 's':
-					print(f'SELLING {ticker_figi.ticker(figi)}')
-					await self.order_manager.sell(self.instrument_list_by_figi[figi])
-				elif user_input == 'l':
-					print('LISTING ORDERS:')
-					await self.order_manager.list_orders()
-				elif user_input == '+':
-					amount = Decimal(Prompt.ask("Pay in amount (10000)", default="10000"))
-					await self.account_manager.pay_in(amount)
-					print(await self.account_manager.get_balance())
-				elif user_input == 'o':
-					await self.account_manager.account_operations(from_=datetime.combine(now(), time.min))
-				elif user_input == 'a':
-					print(await self.account_manager.get_balance())
-				elif user_input == 'p':
-					await self.account_manager.get_positions()
-				print("___\n")
-
+		print(f"You've entered '{user_input}'")
+		if user_input == 'b':
+			print(f'BUYING {ticker_figi.ticker(figi)}')
+			await self.order_manager.buy(self.instrument_list_by_figi[figi])
+		elif user_input == 's':
+			print(f'SELLING {ticker_figi.ticker(figi)}')
+			await self.order_manager.sell(self.instrument_list_by_figi[figi])
+		elif user_input == 'l':
+			print('LISTING ORDERS:')
+			await self.order_manager.list_orders()
+		elif user_input == '+':
+			amount = Decimal(Prompt.ask("Pay in amount (10000)", default="10000"))
+			await self.account_manager.pay_in(amount)
+			print(await self.account_manager.get_balance())
+		elif user_input == 'o':
+			await self.account_manager.account_operations(from_=datetime.combine(now(), time.min))
+		elif user_input == 'a':
+			print(await self.account_manager.get_balance())
+		elif user_input == 'p':
+			await self.account_manager.get_positions()
+		print("___\n")
 
 
 	async def process_stream_response(self, market_response):
-		await self.request_action(market_response)
 		...
 
 
@@ -421,23 +421,42 @@ class OrderMonitor(StreamMonitor):
 			# if no instrument is trading stream stops and never continues?
 			async for r in self.stream:
 				if not self.stop:
+					if (r.orderbook or r.last_price or r.candle):
+						figi = (r.orderbook or r.last_price or r.candle).figi
+					else:
+						print("[red] Unsupported kind of stream data")
+						continue
+
+					self.last_market_response = r
+					# erase menu line
+					_print("\r" + ("             " * 10), end="\r")
+
 					# if r.trade:
 					# 	print(f"{ticker_figi.ticker(r.trade.figi)}:      trade = {quotation_to_decimal(r.trade.price)} x {r.trade.quantity} ({r.trade.direction.name})")
 					if r.orderbook:
-						self.instrument_list_by_figi[r.orderbook.figi].update_bid_ask(r.orderbook)
-						await self.process_stream_response(r)
+						self.instrument_list_by_figi[figi].update_bid_ask(r.orderbook)
+						# await self.process_stream_response(r)
 					elif r.last_price:
-						print(f"{ticker_figi.ticker(r.last_price.figi)}: last price = {quotation_to_decimal(r.last_price.price)}")
+						print(f"{ticker_figi.ticker(figi)}: last price = {quotation_to_decimal(r.last_price.price)}")
 						# await self.process_stream_response()
 					elif r.candle:
-						print(f"{ticker_figi.ticker(r.candle.figi)} has finished candle ({r.candle.interval.name})")
+						print(f"{ticker_figi.ticker(figi)} has finished candle ({r.candle.interval.name})")
 						# just append?   won't work for weekends?
-						await self.instrument_list_by_figi[r.candle.figi].update_candles()
-						await self.move_orders(r.candle.figi)
+						await self.instrument_list_by_figi[figi].update_candles()
+						await self.move_orders(figi)
+
+					# print menu line
+					print(
+						f"[white on grey11][bold green]{ticker_figi.ticker(figi)}[/]: [bold]b[/] - BUY, [bold]s[/] - SELL; \t" +
+						f"[bold]General[/]: [bold]l[/] - LIST ORDERS, [bold]+[/] - PAY IN, " +
+						f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS, [bold]p[/] - POSITIONS", end='\r'
+					)
+					await self.process_user_action()
 
 		# except Exception as e:
 		# 	print(f"Stream interrupted due to error: {e}")
 		finally:
+			self.last_market_response = None
 			self.stream.stop()
 			self.stop = True
 			print(f"Stream stopped. OK! (OrderMonitor)")
@@ -491,7 +510,8 @@ async def test_order_monitor():
 		)
 		await order_monitor.init_instruments()
 		order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
-
+		asyncio.get_running_loop().add_reader(sys.stdin, order_monitor.get_user_input)
+		# create_task listening to user input in a while loop that pauses until input is performed
 		while True:
 			await asyncio.sleep(1)
 
