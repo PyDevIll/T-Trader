@@ -367,12 +367,12 @@ class OrderMonitor(StreamMonitor):
 					# triggered only if stream response received (big action delay on slow markets)
 					await self.process_user_action()
 
-		# except Exception as e:
-		# 	print(f"Stream interrupted due to error: {e}")
+		except Exception as e:
+			print(f"Stream interrupted due to error: {e}")
+			self.stop = True
 		finally:
 			self.last_market_response = None
 			self.stream.stop()
-			self.stop = True
 			print(f"Stream stopped. OK! (OrderMonitor)")
 
 

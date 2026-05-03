@@ -273,7 +273,7 @@ class OrderManagerSandbox:
 			print(e)
 			return None
 
-		print(f"{ticker_figi_cache.ticker(order.figi)}: {order.order_type.name} ,{order.direction.name} at {money_to_decimal(order.initial_security_price)} x {order.lots_requested}")
+		print(f"{ticker_figi_cache.ticker(order.figi)}: {order.order_type.name}, {order.direction.name} at {money_to_decimal(order.initial_security_price)} x {order.lots_requested}")
 		print(f"\t\t Execution status: {order.execution_report_status.name}: {money_to_decimal(order.executed_order_price)} x {order.lots_executed}")
 		print(f"\t\t Commission: {money_to_decimal(order.executed_commission)} + {money_to_decimal(order.service_commission)}")
 		if order.stages:
