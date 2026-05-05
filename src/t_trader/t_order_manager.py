@@ -74,8 +74,6 @@ class InstrumentMonitor:
 		self.candle_interval = candle_interval
 		self.bid = None	#quotation
 		self.ask = None #quotation
-		self.limit_up = None
-		self.limit_down = None
 		self.period = period	# period = candle_count
 		self.candle_history = []
 		self.min_price_increment = None
@@ -125,10 +123,7 @@ class InstrumentMonitor:
 		try:
 			self.bid = orderbook.bids[0].price
 			self.ask = orderbook.asks[0].price
-			self.limit_up = orderbook.limit_up
-			self.limit_down = orderbook.limit_down
 			print(f"{ticker_figi.ticker(self.figi)} bid/ask = {quotation_to_decimal(self.bid)} / {quotation_to_decimal(self.ask)}")
-			print(f"Limit up/down = {quotation_to_decimal(self.limit_up)} / {quotation_to_decimal(self.limit_down)}")
 		except Exception as e:
 			print(f"Cannot update bid/ask for {ticker_figi.ticker(self.figi)}: {e}")
 
@@ -159,6 +154,11 @@ class InstrumentMonitor:
 					print("Order should be moved...")
 					order_id = await self.order_manager.change_order(order_id, price_quotation, self.lots)
 					return order_id
+			else:
+				# if order execution report is not new (i.e. order cancelled)
+				# make order = None so it will be replaced with new
+				return None
+
 		# return unchanged
 		return order_id
 
@@ -221,7 +221,6 @@ class OrderMonitor(StreamMonitor):
 	def __init__(self, client, order_manager):
 		super().__init__(client)
 		self.instrument_list_by_figi = {}	# {figi: InstrumentMonitor}
-		self.running_task = None
 		self.order_manager = order_manager
 		self.account_manager = order_manager.account_manager
 		self.last_market_response = None
@@ -243,19 +242,16 @@ class OrderMonitor(StreamMonitor):
 			print(f"Trading status of {ticker_figi.ticker(status.figi)} is {status.trading_status.name}. Tradable = {self.instrument_list_by_figi[status.figi].is_trading}")
 
 
-	def get_user_input(self):
-		self.last_user_input = sys.stdin.readline().strip()
+	async def get_user_input(self):
+		while True:
+			user_input = await asyncio.to_thread(input, "")
+			await self.process_user_action(user_input)
 
 
-	async def process_user_action(self):
-		user_input = self.last_user_input
-		self.last_user_input = None
-		if not user_input:
+	async def process_user_action(self, user_input):
+		if not self.last_market_response:
 			return
-
 		market_response = self.last_market_response
-		if not market_response:
-			return
 
 		try:
 			figi = (market_response.orderbook or market_response.last_price or market_response.candle).figi
@@ -364,12 +360,9 @@ class OrderMonitor(StreamMonitor):
 						f"[bold]General[/]: [bold]l[/] - LIST ORDERS, [bold]+[/] - PAY IN, " +
 						f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS, [bold]p[/] - POSITIONS", end='\r'
 					)
-					# triggered only if stream response received (big action delay on slow markets)
-					await self.process_user_action()
 
-		except Exception as e:
-			print(f"Stream interrupted due to error: {e}")
-			self.stop = True
+		# stream error shouldn't stop entire program
+		# exceptions handled in parent class within while loop with retrying logic
 		finally:
 			self.last_market_response = None
 			self.stream.stop()
@@ -399,7 +392,7 @@ async def test_order_monitor():
 				type="etf",
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
-				lots=2
+				lots=1
 			)
 		)
 		order_monitor.add_instrument(
@@ -409,7 +402,7 @@ async def test_order_monitor():
 				type="etf",
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
-				lots=3
+				lots=1
 			)
 		)
 		order_monitor.add_instrument(
@@ -419,7 +412,7 @@ async def test_order_monitor():
 				type="share",
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
-				lots=4
+				lots=1
 			)
 		)
 		# order_monitor.add_instrument(
@@ -434,7 +427,7 @@ async def test_order_monitor():
 		# )
 		await order_monitor.init_instruments()
 		order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
-		asyncio.get_running_loop().add_reader(sys.stdin, order_monitor.get_user_input)
+		order_monitor.input_task = asyncio.create_task(order_monitor.get_user_input())
 		# create_task listening to user input in a while loop that pauses until input is performed
 		while True:
 			await asyncio.sleep(1)

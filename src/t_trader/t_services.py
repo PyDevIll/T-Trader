@@ -231,12 +231,11 @@ class OrderManagerSandbox:
 			print(f"Cannot post order: {e.metadata.message}")
 
 		inspect(post_order_response)
-		input()
 		if post_order_response.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
 			print(f"Success! ({post_order_response.execution_report_status.name})")
 			return post_order_response.order_id
 		print("Order rejected!")
-		return False	# order rejected
+		return None
 
 
 	async def change_order(self, order_id, price_quotation, lots):
@@ -259,7 +258,7 @@ class OrderManagerSandbox:
 			print(f"Order changed! ({post_order_response.execution_report_status.name}) New price = {post_order_response.initial_security_price}")
 			return post_order_response.order_id
 		print("Order change rejected!")
-		return False	# order rejected
+		return None
 
 
 	async def get_order(self, order_id):
@@ -300,6 +299,7 @@ class StreamMonitor():
 		self.client = client
 		self.stream = None
 		self.running_task = None
+		self.input_task = None
 		self.stop = False
 		self.show = True
 
@@ -323,6 +323,7 @@ class StreamMonitor():
 			else:
 				retry_count = 0
 		print("Stream ended by setting stop flag")
+		asyncio.cancel(self.input_task)
 
 	async def _monitor(self):
 		...		# abstract
