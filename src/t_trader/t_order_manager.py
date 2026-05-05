@@ -154,6 +154,11 @@ class InstrumentMonitor:
 					print("Order should be moved...")
 					order_id = await self.order_manager.change_order(order_id, price_quotation, self.lots)
 					return order_id
+			else:
+				# if order execution report is not new (i.e. order cancelled)
+				# make order = None so it will be replaced with new
+				return None
+
 		# return unchanged
 		return order_id
 
@@ -216,8 +221,6 @@ class OrderMonitor(StreamMonitor):
 	def __init__(self, client, order_manager):
 		super().__init__(client)
 		self.instrument_list_by_figi = {}	# {figi: InstrumentMonitor}
-		self.running_task = None
-		self.input_task = None
 		self.order_manager = order_manager
 		self.account_manager = order_manager.account_manager
 		self.last_market_response = None
@@ -389,7 +392,7 @@ async def test_order_monitor():
 				type="etf",
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
-				lots=2
+				lots=1
 			)
 		)
 		order_monitor.add_instrument(
@@ -399,7 +402,7 @@ async def test_order_monitor():
 				type="etf",
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
-				lots=3
+				lots=1
 			)
 		)
 		order_monitor.add_instrument(
@@ -409,7 +412,7 @@ async def test_order_monitor():
 				type="share",
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
-				lots=4
+				lots=1
 			)
 		)
 		# order_monitor.add_instrument(
@@ -425,7 +428,6 @@ async def test_order_monitor():
 		await order_monitor.init_instruments()
 		order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
 		order_monitor.input_task = asyncio.create_task(order_monitor.get_user_input())
-		asyncio.get_running_loop().add_reader(sys.stdin, order_monitor.get_user_input)
 		# create_task listening to user input in a while loop that pauses until input is performed
 		while True:
 			await asyncio.sleep(1)

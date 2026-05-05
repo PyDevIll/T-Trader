@@ -300,6 +300,7 @@ class StreamMonitor():
 		self.client = client
 		self.stream = None
 		self.running_task = None
+		self.input_task = None
 		self.stop = False
 		self.show = True
 
@@ -323,6 +324,7 @@ class StreamMonitor():
 			else:
 				retry_count = 0
 		print("Stream ended by setting stop flag")
+		asyncio.cancel(self.input_task)
 
 	async def _monitor(self):
 		...		# abstract
