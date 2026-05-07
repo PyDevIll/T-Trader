@@ -82,14 +82,14 @@ class InstrumentMonitor:
 		self.lots = lots
 		self.hi_order = None
 		self.lo_order = None
-		self.is_trading = True
+		# self.is_trading = True
 		self.order_manager = None
 
 
 	async def update_candles(self):
-		if not self.is_trading:
-			print(f"Trying to update not trading instrument ({self.figi}).")
-			return False
+		# if not self.is_trading:
+		# 	print(f"Trying to update not trading instrument ({self.figi}).")
+		# 	return False
 
 		candles = []
 		from_ = now() - candle_interval_to_timedelta(self.candle_interval) * self.period
@@ -100,7 +100,7 @@ class InstrumentMonitor:
 			interval=self.candle_interval,
 			candle_source_type=CandleSource.CANDLE_SOURCE_INCLUDE_WEEKEND
 		)).candles
-		# if no enough candles increase from_ until len(candle) = period 
+		# if no enough candles - increase from_ until len(candle) = period
 		while len(candles) < self.period:
 			from_ -= candle_interval_to_timedelta(self.candle_interval)
 			print(f"Not enough candles for {self.figi} ({len(candles)}). Getting candles from {from_}")
@@ -165,8 +165,8 @@ class InstrumentMonitor:
 
 	# moved to InstrumentMonitor
 	async def move_orders(self):
-		if not self.is_trading:
-			return
+		# if not self.is_trading:
+		# 	return
 
 		sell_quotation = self.quantize(self.ma + self.ma * self.deviation_percent)
 		buy_quotation = self.quantize(self.ma - self.ma * self.deviation_percent)
@@ -233,13 +233,13 @@ class OrderMonitor(StreamMonitor):
 		self.instrument_list_by_figi[instrument_monitor.figi] = instrument_monitor
 
 
-	async def check_trading_statuses(self):
-		wanted_status = [SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING, SecurityTradingStatus.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING]
-		figis = [figi for figi, i in self.instrument_list_by_figi.items()]
-		statuses = await self.client.market_data.get_trading_statuses(instrument_ids=figis)
-		for status in statuses.trading_statuses:
-			self.instrument_list_by_figi[status.figi].is_trading = status.trading_status in wanted_status
-			print(f"Trading status of {ticker_figi.ticker(status.figi)} is {status.trading_status.name}. Tradable = {self.instrument_list_by_figi[status.figi].is_trading}")
+	# async def check_trading_statuses(self):
+	# 	wanted_status = [SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING, SecurityTradingStatus.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING]
+	# 	figis = [figi for figi, i in self.instrument_list_by_figi.items()]
+	# 	statuses = await self.client.market_data.get_trading_statuses(instrument_ids=figis)
+	# 	for status in statuses.trading_statuses:
+	# 		self.instrument_list_by_figi[status.figi].is_trading = status.trading_status in wanted_status
+	# 		print(f"Trading status of {ticker_figi.ticker(status.figi)} is {status.trading_status.name}. Tradable = {self.instrument_list_by_figi[status.figi].is_trading}")
 
 
 	async def get_user_input(self):
@@ -275,7 +275,7 @@ class OrderMonitor(StreamMonitor):
 			await self.account_manager.pay_in(amount)
 			print(await self.account_manager.get_balance())
 		elif user_input == 'o':
-			await self.account_manager.account_operations(from_=datetime.combine(now(), time.min))
+			await self.account_manager.account_operations(from_=now() - timedelta(days=1))
 		elif user_input == 'a':
 			print(await self.account_manager.get_balance())
 		elif user_input == 'p':
@@ -300,7 +300,7 @@ class OrderMonitor(StreamMonitor):
 
 
 	async def init_instruments(self):
-		await self.check_trading_statuses()
+		# await self.check_trading_statuses()
 		for figi, i in self.instrument_list_by_figi.items():
 			await i.update_candles()
 			if i.type == "etf":
@@ -333,22 +333,23 @@ class OrderMonitor(StreamMonitor):
 		trade_instruments = [TradeInstrument(instrument_id=figi) for figi in self.instrument_list_by_figi.keys()]
 		candle_instruments = [CandleInstrument(instrument_id=figi, interval=i.candle_interval) for figi, i in self.instrument_list_by_figi.items()]
 		orderbook_instruments = [OrderBookInstrument(instrument_id=figi, depth=1) for figi in self.instrument_list_by_figi.keys()]	# for real bid/ask prices
-		# self.stream.trades.subscribe(trade_instruments)
+
 		self.stream.order_book.subscribe(orderbook_instruments)
 		self.stream.last_price.subscribe(trade_instruments)
 		self.stream.candles.waiting_close(enabled=True).subscribe(candle_instruments)	# cannot specify candle_source_type=CandleSource.CANDLE_SOURCE_INCLUDE_WEEKEND
 		try:
 			# first response returns value "SubscribeTradesResponse(..)"
-			# if no instrument is trading stream stops and never continues?
 			async for r in self.stream:
 				if not self.stop:
 					if (r.orderbook or r.last_price or r.candle):
 						figi = (r.orderbook or r.last_price or r.candle).figi
 					else:
 						print("[red] Unsupported kind of stream data")
+						inspect(r)
 						continue
 
 					self.last_market_response = r
+
 					# erase menu line
 					_print("\r" + ("             " * 10), end="\r")
 
@@ -361,12 +362,11 @@ class OrderMonitor(StreamMonitor):
 						f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS, [bold]p[/] - POSITIONS", end='\r'
 					)
 
-		# stream error shouldn't stop entire program
+		# stream error shouldn't stop monitor
 		# exceptions handled in parent class within while loop with retrying logic
 		finally:
 			self.last_market_response = None
 			self.stream.stop()
-			print(f"Stream stopped. OK! (OrderMonitor)")
 
 
 async def test_order_manager():
@@ -428,7 +428,6 @@ async def test_order_monitor():
 		await order_monitor.init_instruments()
 		order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
 		order_monitor.input_task = asyncio.create_task(order_monitor.get_user_input())
-		# create_task listening to user input in a while loop that pauses until input is performed
 		while True:
 			await asyncio.sleep(1)
 
@@ -448,4 +447,7 @@ But there's no guarantee that such limit orders will fire.
 28.04.2026
 Candles are updated later, after trade moment. How to use trade events in trading?
 
+07.05.2026
+Instruments update their trading status only on startup and never refreshes it
+Trading status is not needed? When the instrument is not trading - there's no any stream data for it
 """

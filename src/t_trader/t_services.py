@@ -313,17 +313,20 @@ class StreamMonitor():
 				print(f"Reconnecting try: {retry_count}")
 			try:
 				await self._monitor()
-			except (AioRequestError, asyncio.exceptions.CancelledError) as e:
+			except AioRequestError as e:
 				print(f"Stream interrupted: {e}")
 				delay = min(base_delay * (2 ** retry_count), max_delay)
 				delay += random.uniform(-delay*0.1, delay*0.1)
 				print(f"Waiting before retry: {delay:.2f} sec.")
 				await asyncio.sleep(delay)
 				retry_count += 1
+			except asyncio.exceptions.CancelledError:
+				self.stop = True
 			else:
 				retry_count = 0
 		print("Stream ended by setting stop flag")
-		asyncio.cancel(self.input_task)
+		self.input_task.cancel()
+		self.running_task.cancel()
 
 	async def _monitor(self):
 		...		# abstract
