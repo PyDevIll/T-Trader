@@ -13,12 +13,18 @@ from t_order_manager import (
 )
 
 from t_tech.invest.sandbox.async_client import AsyncSandboxClient
-from t_tech.invest,utils import now
+from t_tech.invest.utils import now
 
 from datetime import datetime, timedelta
-import pandas as pd
 from enum import Enum
+import asyncio
 import os
+import json
+_print = print
+from rich import inspect, print
+from rich.prompt import Prompt
+from dotenv import load_dotenv
+
 
 # datetime.weekday() = 0..6
 weekday_str = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -38,7 +44,7 @@ schedule_tab_shares = {
 	"4":
 		{
 			"Mon": ["ABRD", "FIXR", "MBNK", "MRKP", "MRKU", "MSRS", "MSTT", "OZPH"],
-			"Tue": ["ABIO", "ABRD", "DATA", "DOMRF", "ELFV", "EUTR", "GEMC", "LENT", "LSRG", "MDMG", "MRKP". "MSRS", "MVID", "OZON", "OZPH", "PIKK"],
+			"Tue": ["ABIO", "ABRD", "DATA", "DOMRF", "ELFV", "EUTR", "GEMC", "LENT", "LSRG", "MDMG", "MRKP", "MSRS", "MVID", "OZON", "OZPH", "PIKK"],
 			"Wed": ["ABRD", "ASTR", "CBOM", "DATA", "DOMRF", "FIXR", "LENT", "MDMG", "MRKP", "MSRS", "OGKB", "OZON", "OZPH", "POSI"],
 			"Thu": ["ABRD", "APTK", "ASTR", "BSPB", "CBOM", "DATA", "DOMRF", "GEMC", "GMKN", "LENT", "MDMG", "MRKU", "MSRS", "OGKB", "OZPH", "POSI"],
 			"Fri": ["BANE", "DOMRF", "ELFV", "LENT", "MDMG", "MRKP", "MRKU", "MSNG", "MSRS", "OZON", "OZPH", "POSI"],
@@ -100,17 +106,17 @@ schedule_tab_etfs = {
 
 last_time = now()
 
-async def every5Minutes(do_sleep=True):
+async def every5Minutes():
 	global last_time
 
 	while True:
+		print("... ", end='', flush=True)
 		await asyncio.sleep(60)
 
 		if (now().minute % 5) == 0:
 			if now() > last_time:
 				last_time = now()
 				break
-
 	return True
 
 
@@ -120,14 +126,38 @@ class Scheduler:
 		self.schedule_tab = schedule_tab
 		self.orders_by_ticker = {}
 		self.order_manager = order_manager
-		self.ticker_queue = []
-		self.weekday = ""
-		self.hour = ""
+		self.ticker_list = []
+		self.prev_ticker_list = None
+		self.weekday = weekday_str[now().weekday()]
+		self.last_hour = now().hour
+
 
 	async def timer(self):
-		print("...")
-		await every5Minutes()
-		print(now().strftime("%H : %M"))
+		try:
+			while True:
+				await every5Minutes()
+
+				# 5 minutes before hour end
+				next_hour_in_5min = (now() + timedelta(minutes=5, seconds=59)).hour
+				self.weekday = weekday_str[(now() + timedelta(minutes=5, seconds=59)).weekday()]
+				print(f"{now().strftime("%H:%M")} > {self.weekday}, {now().hour}")
+
+				if now().hour != next_hour_in_5min:
+					self.prev_ticker_list = self.ticker_list[:]
+					if str(next_hour_in_5min) in schedule_tab:
+						self.ticker_list = self.schedule_tab[str(next_hour_in_5min)][self.weekday]
+					else:
+						self.ticker_list = None
+					await self.sell_scheduled()
+
+				# new hour started
+				if self.last_hour != now().hour:
+					await self.buy_scheduled()
+					self.last_hour = now().hour
+
+		except Exception as e:
+			inspect(e)
+			self.timer_task.cancel()
 		...
 
 
@@ -136,25 +166,66 @@ class Scheduler:
 
 
 	async def buy_scheduled(self):
+		print("Buying new scheduled shares...")
+		if not self.ticker_list:
+			print("No tickers scheduled")
+			return
+
+		for ticker in self.ticker_list:
+			if ticker in self.prev_ticker_list:
+				print(f"Keeping {ticker}. No BUY")
+				continue
+			print("Little delay between orders...")
+			await asyncio.sleep(5)
+			order_id = await self.buy(ticker)
+			if order_id:
+				self.orders_by_ticker[ticker] = order_id
+				print("[green]Success!")
+			else:
+				print(f"[red]Couldn't BUY {ticker}.")
+		print("___\n")
 		...
 
 
 	async def sell_scheduled(self):
+		print("Closing earlier positions... ")
+		if not self.orders_by_ticker:
+			print("No opened positions!")
+			return
+
+		for ticker, order_id in self.orders_by_ticker.items():
+			if ticker in self.ticker_list:
+				print(f"Keeping {ticker}. No SELL")
+				continue
+			print("Little delay between orders...")
+			await asyncio.sleep(5)
+			await self.sell(ticker, order_id)
 		...
 
 
 	async def buy(self, ticker):
+		print(f"Posting BUY order for {ticker}")
+		order_id = 123 # self.order_manager._post_order(...)
 		...
+		return order_id
 
+
+	async def sell(self, ticker, order_id):
+		print(f"Selling {ticker}")
+		...
+		return True
 
 
 async def scheduled_trading():
 	load_dotenv()
-	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
-		account_manager = AccountManagerSandbox(client).connect("schedule")
-		order_manager = OrderManagerSandbox(client, account_manager)
-		scheduler = Scheduler(schedule_tab_shares, order_manager)
-		scheduler.timer_task = asyncio.create_task(scheduler.timer())
+	# async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
+		# account_manager = AccountManagerSandbox(client).connect("schedule")
+		# order_manager = OrderManagerSandbox(client, account_manager)
+	scheduler = Scheduler(schedule_tab_shares, None)
+	scheduler.timer_task = asyncio.create_task(scheduler.timer())
+	while True:
+		await asyncio.sleep(1)
+
 
 
 if __name__ == "__main__":
@@ -164,3 +235,4 @@ if __name__ == "__main__":
 		asyncio.run(scheduled_trading())
 	except KeyboardInterrupt:
 		print("KeyboardInterrupt handled")
+
