@@ -229,6 +229,7 @@ class OrderManagerSandbox:
 			)
 		except AioRequestError as e:
 			print(f"Cannot post order: {e.metadata.message}")
+			return None
 
 		inspect(post_order_response)
 		if post_order_response.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
@@ -253,6 +254,7 @@ class OrderManagerSandbox:
 			)
 		except AioRequestError as e:
 			print(f"Cannot post order: {e.metadata.message}")
+			return None
 
 		if post_order_response.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
 			print(f"Order changed! ({post_order_response.execution_report_status.name}) New price = {post_order_response.initial_security_price}")
