@@ -78,7 +78,7 @@ class InstrumentMonitor:
 		self.candle_history = []
 		self.min_price_increment = None
 		self.ma = Decimal(0)
-		self.deviation_percent = Decimal(0.1)
+		self.deviation_percent = Decimal(0.0015) # 0.15%
 		self.lots = lots
 		self.hi_order = None
 		self.lo_order = None
@@ -320,11 +320,21 @@ class OrderMonitor(StreamMonitor):
 					continue
 
 				if order.direction == OrderDirection.ORDER_DIRECTION_BUY:
-					self.instrument_list_by_figi[order.figi].lo_order = order.order_id
-					print(f"[green bold]FOUND[/] lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+					if not self.instrument_list_by_figi[order.figi].lo_order:
+						self.instrument_list_by_figi[order.figi].lo_order = order.order_id
+						print(f"[green bold]FOUND[/] lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+					else:
+						# more than one BUY order
+						await self.order_manager.cancel_order(order.order_id)
+						print(f"[yellow bold]CANCELLED[/] dup lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
 				elif order.direction == OrderDirection.ORDER_DIRECTION_SELL:
-					self.instrument_list_by_figi[order.figi].hi_order = order.order_id
-					print(f"[green bold]FOUND[/] hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+					if not self.instrument_list_by_figi[order.figi].hi_order:
+						self.instrument_list_by_figi[order.figi].hi_order = order.order_id
+						print(f"[green bold]FOUND[/] hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+					else:
+						# more than one SELL order
+						await self.order_manager.cancel_order(order.order_id)
+						print(f"[yellow bold]CANCELLED[/] dup hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
 		print("\n____\n\n")
 
 

@@ -295,6 +295,15 @@ class OrderManagerSandbox:
 		return order_list_response.orders
 
 
+	async def cancel_order(self, order_id):
+		cancel_response = await self.client.sandbox.cancel_sandbox_order(
+			account_id=self.account_id,
+			order_id=order_id,
+			order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE
+		)
+		inspect(cancel_response.response_metadata)
+
+
 
 class StreamMonitor():
 	def __init__(self, client):
