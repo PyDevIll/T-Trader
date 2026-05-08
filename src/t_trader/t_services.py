@@ -144,6 +144,7 @@ class AccountManagerSandbox():
 
 	async def open_account(self, name=""):
 		await self.client.sandbox.open_sandbox_account(name=name)
+		print(f"opened {name} account")
 
 
 	async def get_account(self, name=""):
@@ -162,11 +163,11 @@ class AccountManagerSandbox():
 				return None
 
 
-	async def connect(self):
-		default_account = await self.get_account("default")
+	async def connect(self, name="default"):
+		default_account = await self.get_account(name)
 		if not default_account:
-			await self.open_account("default")
-			default_account = await self.get_account("default")
+			await self.open_account(name)
+			default_account = await self.get_account(name)
 
 		self.account = default_account
 		return self
@@ -292,6 +293,25 @@ class OrderManagerSandbox:
 			print("___\n")
 		return order_list_response.orders
 
+
+	async def get_tradables_from(self, figi_list):
+		wanted_status = [SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING, SecurityTradingStatus.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING]
+		statuses = await self.client.market_data.get_trading_statuses(instrument_ids=figi_list)
+		tradable_figi_list = []
+		for status in statuses.trading_statuses:
+			if status.trading_status in wanted_status:
+				tradable_figi_list.append(status.figi)
+
+		return tradable_figi_list
+
+
+	async def get_bid_ask(self, figi):
+		orderbook = await self.client.market_data.get_order_book(instrument_id=figi, depth=1)
+		inspect(orderbook)
+		bid = orderbook.bids[0].price
+		ask = orderbook.asks[0].price
+		print(f"Current bid/ask for {figi} = {bid} / {ask}")
+		return (bid, ask)
 
 
 class StreamMonitor():

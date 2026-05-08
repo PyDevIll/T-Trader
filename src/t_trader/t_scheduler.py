@@ -8,12 +8,10 @@ from t_services import (
 	share_ticker_to_figi,
 )
 from t_services import 	ticker_figi_cache as ticker_figi
-from t_order_manager import (
-	OrderManagerSandbox,
-)
 
 from t_tech.invest.sandbox.async_client import AsyncSandboxClient
 from t_tech.invest.utils import now
+from t_tech.invest.exceptions import AioRequestError
 
 from datetime import datetime, timedelta
 from enum import Enum
@@ -133,36 +131,40 @@ class Scheduler:
 
 
 	async def timer(self):
-		try:
-			while True:
-				await every5Minutes()
+		# try:
+		while True:
+			await every5Minutes()
 
-				# 5 minutes before hour end
-				next_hour_in_5min = (now() + timedelta(minutes=5, seconds=59)).hour
-				self.weekday = weekday_str[(now() + timedelta(minutes=5, seconds=59)).weekday()]
-				print(f"{now().strftime("%H:%M")} > {self.weekday}, {now().hour}")
+			# 5 minutes before hour end
+			next_hour_in_5min = (now() + timedelta(minutes=5, seconds=59)).hour
+			self.weekday = weekday_str[(now() + timedelta(minutes=5, seconds=59)).weekday()]
+			print(f"{now().strftime("%H:%M")} > {self.weekday}, {now().hour}")
 
-				if now().hour != next_hour_in_5min:
-					self.prev_ticker_list = self.ticker_list[:]
-					if str(next_hour_in_5min) in schedule_tab:
-						self.ticker_list = self.schedule_tab[str(next_hour_in_5min)][self.weekday]
-					else:
-						self.ticker_list = None
-					await self.sell_scheduled()
+			if now().hour != next_hour_in_5min:
+				self.prev_ticker_list = self.ticker_list[:]
+				if str(next_hour_in_5min) in self.schedule_tab:
+					self.ticker_list = self.schedule_tab[str(next_hour_in_5min)][self.weekday]
+					await self.check_trading_statuses()
+				else:
+					self.ticker_list = []
+					print("No scheduled tickers")
+				await self.sell_scheduled()
 
-				# new hour started
-				if self.last_hour != now().hour:
-					await self.buy_scheduled()
-					self.last_hour = now().hour
+			# new hour started
+			if self.last_hour != now().hour:
+				await self.buy_scheduled()
+				self.last_hour = now().hour
 
-		except Exception as e:
-			inspect(e)
-			self.timer_task.cancel()
+		# except Exception as e:
+			# inspect(e)
+			# self.timer_task.cancel()
 		...
 
 
-	async def check_trading_status(self, ticker):
-		...
+	async def check_trading_statuses(self):
+		tradable_ticker_list = self.order_manager.get_tradables_from(self.ticker_list)
+		self.ticker_list = tradable_ticker_list
+		print(f"Tradable scheduled tickers = {tradable_ticker_list}")
 
 
 	async def buy_scheduled(self):
@@ -205,22 +207,26 @@ class Scheduler:
 
 	async def buy(self, ticker):
 		print(f"Posting BUY order for {ticker}")
-		order_id = 123 # self.order_manager._post_order(...)
-		...
-		return order_id
+		figi = ticker_figi.figi(ticker)
+		lots = 1
+		bid, ask = await self.order_manager.get_bid_ask(figi)
+		return await self.order_manager._post_order(figi, bid, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
 
 
 	async def sell(self, ticker, order_id):
+		# order_id is not needed?
 		print(f"Selling {ticker}")
-		...
-		return True
+		figi = ticker_figi.figi(ticker)
+		lots = 1
+		bid, ask = await self.order_manager.get_bid_ask(figi)
+		await self.order_manager._post_order(figi, ask, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
 
 
 async def scheduled_trading():
 	load_dotenv()
-	# async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
-		# account_manager = AccountManagerSandbox(client).connect("schedule")
-		# order_manager = OrderManagerSandbox(client, account_manager)
+	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
+		account_manager = await AccountManagerSandbox(client).connect("schedule")
+		order_manager = OrderManagerSandbox(client, account_manager)
 	scheduler = Scheduler(schedule_tab_shares, None)
 	scheduler.timer_task = asyncio.create_task(scheduler.timer())
 	while True:
