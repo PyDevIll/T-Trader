@@ -162,7 +162,7 @@ class Scheduler:
 
 
 	async def check_trading_statuses(self):
-		tradable_ticker_list = self.order_manager.get_tradables_from(self.ticker_list)
+		tradable_ticker_list = await self.order_manager.get_tradables_from(self.ticker_list)
 		self.ticker_list = tradable_ticker_list
 		print(f"Tradable scheduled tickers = {tradable_ticker_list}")
 
@@ -201,16 +201,37 @@ class Scheduler:
 				continue
 			print("Little delay between orders...")
 			await asyncio.sleep(5)
-			await self.sell(ticker, order_id)
+			order_id = await self.sell(ticker, order_id)
+			if order_id:
+				self.orders_by_ticker[ticker] = order_id
+				print("[green]Success!")
+			else:
+				print(f"[red]Couldn't SELL {ticker}.")
+		print("___\n")
 		...
 
 
 	async def buy(self, ticker):
-		print(f"Posting BUY order for {ticker}")
+		print(f"Buying {ticker}")
 		figi = ticker_figi.figi(ticker)
 		lots = 1
-		bid, ask = await self.order_manager.get_bid_ask(figi)
-		return await self.order_manager._post_order(figi, bid, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
+		try:
+			bid, ask = await self.order_manager.get_bid_ask(figi)
+		except:
+			print("Failed to get BUY price")
+		else:
+			try:
+				order_id = await self.order_manager._post_order(figi, bid, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
+				order = await self.order_manager.get_order(order_id)
+				if order and (
+					order.execution_report_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW or
+					order.execution_report_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
+				):
+					print(f"BUY order posted: {order.execution_report_status.name}")
+					return order_id
+			except:
+				print("Couldn't post BUY order")
+		return None
 
 
 	async def sell(self, ticker, order_id):
@@ -218,8 +239,23 @@ class Scheduler:
 		print(f"Selling {ticker}")
 		figi = ticker_figi.figi(ticker)
 		lots = 1
-		bid, ask = await self.order_manager.get_bid_ask(figi)
-		await self.order_manager._post_order(figi, ask, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
+		try:
+			bid, ask = await self.order_manager.get_bid_ask(figi)
+		except:
+			print("Failed to get SELL price")
+		else:
+			try:
+				order_id = await self.order_manager._post_order(figi, ask, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
+				order = await self.order_manager.get_order(order_id)
+				if order and (
+					order.execution_report_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW or
+					order.execution_report_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL
+				):
+					print(f"SELL order posted: {order.execution_report_status.name}")
+					return order_id
+			except:
+				print("Couldn't post SELL order")
+		return None
 
 
 async def scheduled_trading():
@@ -227,17 +263,16 @@ async def scheduled_trading():
 	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
 		account_manager = await AccountManagerSandbox(client).connect("schedule")
 		order_manager = OrderManagerSandbox(client, account_manager)
-	scheduler = Scheduler(schedule_tab_shares, None)
-	scheduler.timer_task = asyncio.create_task(scheduler.timer())
-	while True:
-		await asyncio.sleep(1)
+		scheduler = Scheduler(schedule_tab_shares, order_manager)
+		scheduler.timer_task = asyncio.create_task(scheduler.timer())
+		while True:
+			await asyncio.sleep(1)
 
 
 
 if __name__ == "__main__":
 	ticker_figi.init()
 	try:
-		# asyncio.run(test_order_manager())
 		asyncio.run(scheduled_trading())
 	except KeyboardInterrupt:
 		print("KeyboardInterrupt handled")

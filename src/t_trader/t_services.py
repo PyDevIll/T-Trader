@@ -18,7 +18,8 @@ from t_tech.invest import (
 	CandleInterval, 
 	InstrumentIdType,
 	Quotation,
-	OrderBookInstrument
+	OrderBookInstrument,
+	SecurityTradingStatus
 )
 from t_tech.invest.sandbox.async_client import AsyncSandboxClient
 from t_tech.invest.schemas import (
