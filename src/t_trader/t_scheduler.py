@@ -102,20 +102,27 @@ schedule_tab_etfs = {
 	"22": { "Mon": [],				"Tue": [],				"Wed": [],				"Thu": [],				"Fri": [],				"Sat": [],				"Sun": []},
 }
 
-last_time = now()
+last_minute = now().minute
 
-async def every5Minutes():
-	global last_time
+async def everyNMinutes(sleep_period=60, minutes=5):
+	global last_minute
 
 	while True:
 		print("... ", end='', flush=True)
-		await asyncio.sleep(60)
+		await asyncio.sleep(sleep_period)
 
-		if (now().minute % 5) == 0:
-			if now() > last_time:
-				last_time = now()
+		if now().minute != last_minute:
+			if (now().minute % minutes) == 0:
+				last_minute = now().minute
 				break
 	return True
+
+
+def now_mock():
+	return _now()+timedelta(hours=1, minutes=10)
+
+_now = now
+now = now_mock
 
 
 class Scheduler:
@@ -133,7 +140,7 @@ class Scheduler:
 	async def timer(self):
 		# try:
 		while True:
-			await every5Minutes()
+			await everyNMinutes(minutes=2, sleep_period=5)
 
 			# 5 minutes before hour end
 			next_hour_in_5min = (now() + timedelta(minutes=5, seconds=59)).hour
@@ -162,9 +169,10 @@ class Scheduler:
 
 
 	async def check_trading_statuses(self):
-		tradable_ticker_list = await self.order_manager.get_tradables_from(self.ticker_list)
-		self.ticker_list = tradable_ticker_list
-		print(f"Tradable scheduled tickers = {tradable_ticker_list}")
+		figi_list = [share_ticker_to_figi(self.order_manager.client, ticker) for ticker in self.ticker_list]
+		tradable_figi_list = await self.order_manager.get_tradables_from(figi_list)
+		self.ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
+		print(f"Tradable scheduled tickers = {self.ticker_list}")
 
 
 	async def buy_scheduled(self):

@@ -115,7 +115,8 @@ class ticker_figi_cache():
 
 
 async def etf_ticker_to_figi(client, ticker):
-	if figi:=ticker_figi_cache.figi(ticker):
+	figi = ticker_figi_cache.figi(ticker)
+	if figi:
 		return figi
 
 	for etf in (await client.instruments.etfs()).instruments:
@@ -126,7 +127,8 @@ async def etf_ticker_to_figi(client, ticker):
 
 
 async def share_ticker_to_figi(client, ticker):
-	if figi:=ticker_figi_cache.figi(ticker):
+	figi = ticker_figi_cache.figi(ticker)
+	if figi:
 		return figi
 
 	for share in (await client.instruments.shares()).instruments:
