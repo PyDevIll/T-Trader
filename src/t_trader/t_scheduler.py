@@ -1,17 +1,21 @@
 # t_scheduler.py
 
 from t_services import (
-	StreamMonitor,
 	AccountManagerSandbox,
 	OrderManagerSandbox,
 	etf_ticker_to_figi,
 	share_ticker_to_figi,
 )
-from t_services import 	ticker_figi_cache as ticker_figi
+from t_services import ticker_figi_cache as ticker_figi
 
 from t_tech.invest.sandbox.async_client import AsyncSandboxClient
 from t_tech.invest.utils import now
 from t_tech.invest.exceptions import AioRequestError
+from t_tech.invest.schemas import (
+	OrderType,
+	OrderDirection,
+	OrderExecutionReportStatus
+)
 
 from datetime import datetime, timedelta
 from enum import Enum
@@ -22,7 +26,7 @@ _print = print
 from rich import inspect, print
 from rich.prompt import Prompt
 from dotenv import load_dotenv
-
+from decimal import Decimal
 
 # datetime.weekday() = 0..6
 weekday_str = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -118,13 +122,6 @@ async def everyNMinutes(sleep_period=60, minutes=5):
 	return True
 
 
-def now_mock():
-	return _now()+timedelta(hours=1, minutes=10)
-
-_now = now
-now = now_mock
-
-
 class Scheduler:
 	def __init__(self, schedule_tab, order_manager):
 		self.timer_task = None
@@ -138,38 +135,41 @@ class Scheduler:
 
 
 	async def timer(self):
-		# try:
 		while True:
-			await everyNMinutes(minutes=2, sleep_period=5)
+			await everyNMinutes()
+			try:
+				await self.process_trades()
+			except Exception as e:
+				inspect(e)
+				self.timer_task.cancel()
+		...
 
-			# 5 minutes before hour end
-			next_hour_in_5min = (now() + timedelta(minutes=5, seconds=59)).hour
-			self.weekday = weekday_str[(now() + timedelta(minutes=5, seconds=59)).weekday()]
-			print(f"{now().strftime("%H:%M")} > {self.weekday}, {now().hour}")
 
-			if now().hour != next_hour_in_5min:
-				self.prev_ticker_list = self.ticker_list[:]
-				if str(next_hour_in_5min) in self.schedule_tab:
-					self.ticker_list = self.schedule_tab[str(next_hour_in_5min)][self.weekday]
-					await self.check_trading_statuses()
-				else:
-					self.ticker_list = []
-					print("No scheduled tickers")
-				await self.sell_scheduled()
+	async def process_trades(self):
+		# 5 minutes before hour end
+		next_hour_in_5min = (now() + timedelta(minutes=5, seconds=59)).hour
+		self.weekday = weekday_str[(now() + timedelta(minutes=5, seconds=59)).weekday()]
+		print(f"{now().strftime("%H:%M")} > {self.weekday}, {now().hour}")
 
-			# new hour started
-			if self.last_hour != now().hour:
-				await self.buy_scheduled()
-				self.last_hour = now().hour
+		if now().hour != next_hour_in_5min:
+			self.prev_ticker_list = self.ticker_list[:]
+			if str(next_hour_in_5min) in self.schedule_tab:
+				self.ticker_list = self.schedule_tab[str(next_hour_in_5min)][self.weekday]
+				await self.check_trading_statuses()
+			else:
+				self.ticker_list = []
+				print("No scheduled tickers")
+			await self.sell_scheduled()
 
-		# except Exception as e:
-			# inspect(e)
-			# self.timer_task.cancel()
+		# new hour started
+		if self.last_hour != now().hour:
+			await self.buy_scheduled()
+			self.last_hour = now().hour
 		...
 
 
 	async def check_trading_statuses(self):
-		figi_list = [share_ticker_to_figi(self.order_manager.client, ticker) for ticker in self.ticker_list]
+		figi_list = [await share_ticker_to_figi(self.order_manager.client, ticker) for ticker in self.ticker_list]
 		tradable_figi_list = await self.order_manager.get_tradables_from(figi_list)
 		self.ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
 		print(f"Tradable scheduled tickers = {self.ticker_list}")
@@ -211,10 +211,19 @@ class Scheduler:
 			await asyncio.sleep(5)
 			order_id = await self.sell(ticker, order_id)
 			if order_id:
-				self.orders_by_ticker[ticker] = order_id
+				self.orders_by_ticker[ticker] = None	# to be deleted
 				print("[green]Success!")
 			else:
 				print(f"[red]Couldn't SELL {ticker}.")
+
+		# clean up nones from orders_by_ticker
+		new_orders_by_ticker = {}
+		for ticker, order_id in self.orders_by_ticker.items():
+			if order_id:
+				new_orders_by_ticker[ticker] = order_id
+
+		self.orders_by_ticker = new_orders_by_ticker
+
 		print("___\n")
 		...
 
@@ -229,7 +238,7 @@ class Scheduler:
 			print("Failed to get BUY price")
 		else:
 			try:
-				order_id = await self.order_manager._post_order(figi, bid, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
+				order_id = await self.order_manager.post_order(figi, bid, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
 				order = await self.order_manager.get_order(order_id)
 				if order and (
 					order.execution_report_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW or
@@ -237,8 +246,10 @@ class Scheduler:
 				):
 					print(f"BUY order posted: {order.execution_report_status.name}")
 					return order_id
-			except:
+			except Exception as e:
 				print("Couldn't post BUY order")
+				inspect(e)
+
 		return None
 
 
@@ -253,7 +264,7 @@ class Scheduler:
 			print("Failed to get SELL price")
 		else:
 			try:
-				order_id = await self.order_manager._post_order(figi, ask, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
+				order_id = await self.order_manager.post_order(figi, ask, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
 				order = await self.order_manager.get_order(order_id)
 				if order and (
 					order.execution_report_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW or
@@ -261,8 +272,10 @@ class Scheduler:
 				):
 					print(f"SELL order posted: {order.execution_report_status.name}")
 					return order_id
-			except:
+			except Exception as e:
 				print("Couldn't post SELL order")
+				inspect(e)
+
 		return None
 
 
@@ -277,9 +290,135 @@ async def scheduled_trading():
 			await asyncio.sleep(1)
 
 
+_now = now
+class now_mock():
+	delta_time = (_now() - _now().replace(day=11, hour=3, minute=50))
+
+	@classmethod
+	def now(cls):
+		return _now() - cls.delta_time
+
+	@classmethod
+	def set_time(cls, new_time):
+		cls.delta_time = (_now() - new_time)
+
+
+
+async def test_scheduler():
+	load_dotenv()
+	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
+		account_manager = await AccountManagerSandbox(client).connect("schedule")
+		order_manager = OrderManagerSandbox(client, account_manager)
+		scheduler = Scheduler(schedule_tab_shares, order_manager)
+
+		print(account_manager.account)
+		print(await account_manager.get_balance_raw())
+		balance = await account_manager.get_balance()
+		print(f"Current balance = {balance}")
+		if balance < 100000:
+			await account_manager.pay_in(Decimal(100000))
+			balance = await account_manager.get_balance()
+			print(f"Paid in. Balance = {balance}")
+
+
+		# scheduler.ticker_list = ticker_list
+		ticker_list = schedule_tab_shares["4"]["Tue"]
+		print(ticker_list)
+		figi_list = [await share_ticker_to_figi(client, ticker) for ticker in ticker_list]
+		print(figi_list)
+		tradable_figi_list = await order_manager.get_tradables_from(figi_list)
+		print(tradable_figi_list)
+		ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
+		print(ticker_list)
+
+		input("Moving to trades...")
+
+		now_mock.set_time(_now().replace(day=12, hour=3, minute=50))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		now_mock.set_time(_now().replace(day=12, hour=3, minute=55))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		now_mock.set_time(_now().replace(day=12, hour=4, minute=0))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+
+		input("Moving to next hour...")
+
+		ticker_list = schedule_tab_shares["5"]["Tue"]
+		print(ticker_list)
+		figi_list = [await share_ticker_to_figi(client, ticker) for ticker in ticker_list]
+		print(figi_list)
+		tradable_figi_list = await order_manager.get_tradables_from(figi_list)
+		print(tradable_figi_list)
+		ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
+		print(ticker_list)
+
+		input("Moving to trades...")
+
+		now_mock.set_time(_now().replace(day=12, hour=4, minute=50))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		now_mock.set_time(_now().replace(day=12, hour=4, minute=55))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		now_mock.set_time(_now().replace(day=12, hour=5, minute=0))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+
+		input("Moving to next hour")
+
+		ticker_list = schedule_tab_shares["6"]["Tue"]
+		print(ticker_list)
+		figi_list = [await share_ticker_to_figi(client, ticker) for ticker in ticker_list]
+		print(figi_list)
+		tradable_figi_list = await order_manager.get_tradables_from(figi_list)
+		print(tradable_figi_list)
+		ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
+		print(ticker_list)
+
+		input("Moving to trades...")
+
+		now_mock.set_time(_now().replace(day=12, hour=5, minute=50))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		now_mock.set_time(_now().replace(day=12, hour=5, minute=55))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		now_mock.set_time(_now().replace(day=12, hour=6, minute=0))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+
+		input("Moving to next hour")
+
+		ticker_list = schedule_tab_shares["7"]["Tue"]
+		print(ticker_list)
+		figi_list = [await share_ticker_to_figi(client, ticker) for ticker in ticker_list]
+		print(figi_list)
+		tradable_figi_list = await order_manager.get_tradables_from(figi_list)
+		print(tradable_figi_list)
+		ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
+		print(ticker_list)
+
+		input("Moving to trades...")
+
+		now_mock.set_time(_now().replace(day=12, hour=6, minute=50))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		now_mock.set_time(_now().replace(day=12, hour=6, minute=55))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		now_mock.set_time(_now().replace(day=12, hour=7, minute=0))
+		print(f"{now()}. Running trades...")
+		await scheduler.process_trades()
+		print("Test completed")
+
 
 if __name__ == "__main__":
 	ticker_figi.init()
+	# now = now_mock.now
+	# asyncio.run(test_scheduler())
+
 	try:
 		asyncio.run(scheduled_trading())
 	except KeyboardInterrupt:
