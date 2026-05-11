@@ -18,7 +18,8 @@ from t_tech.invest import (
 	CandleInterval, 
 	InstrumentIdType,
 	Quotation,
-	OrderBookInstrument
+	OrderBookInstrument,
+	SecurityTradingStatus
 )
 from t_tech.invest.sandbox.async_client import AsyncSandboxClient
 from t_tech.invest.schemas import (
@@ -144,6 +145,7 @@ class AccountManagerSandbox():
 
 	async def open_account(self, name=""):
 		await self.client.sandbox.open_sandbox_account(name=name)
+		print(f"opened {name} account")
 
 
 	async def get_account(self, name=""):
@@ -162,11 +164,11 @@ class AccountManagerSandbox():
 				return None
 
 
-	async def connect(self):
-		default_account = await self.get_account("default")
+	async def connect(self, name="default"):
+		default_account = await self.get_account(name)
 		if not default_account:
-			await self.open_account("default")
-			default_account = await self.get_account("default")
+			await self.open_account(name)
+			default_account = await self.get_account(name)
 
 		self.account = default_account
 		return self
@@ -174,8 +176,15 @@ class AccountManagerSandbox():
 
 	async def get_balance(self):
 		balance_response = await self.client.sandbox.get_sandbox_withdraw_limits(account_id=self.account.id)
-		balance = balance_response.money[0]
+		if balance_response.money:
+			balance = balance_response.money[0]
+		else:
+			return Decimal(0)
 		return money_to_decimal(balance)
+
+
+	async def get_balance_raw(self):
+		return await self.client.sandbox.get_sandbox_withdraw_limits(account_id=self.account.id)
 
 
 	async def pay_in(self, amount_decimal):
@@ -212,9 +221,11 @@ class OrderManagerSandbox:
 		self.account_id = account_manager.account.id
 		self.client = client
 
-	async def _post_order(self, figi, price, order_type, order_direction, lots=1):
-		order_id = str(uuid.uuid4())
+
+	async def post_order(self, figi, price, order_type, order_direction, lots=1):
 		print(f"Posting order {self.account_id} ({locals()})")
+		order_id = str(uuid.uuid4())
+		print(f"UUID for order = {order_id}")
 		try:
 			post_order_response = await self.client.sandbox.post_sandbox_order(
 				figi=figi,
@@ -303,6 +314,35 @@ class OrderManagerSandbox:
 		)
 		inspect(cancel_response.response_metadata)
 
+
+	async def get_tradables_from(self, figi_list):
+		if not figi_list:
+			return []
+
+		wanted_status = [SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING, SecurityTradingStatus.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING]
+		statuses = await self.client.market_data.get_trading_statuses(instrument_ids=figi_list)
+
+		tradable_figi_list = []
+		for status in statuses.trading_statuses:
+			if status.trading_status in wanted_status:
+				tradable_figi_list.append(status.figi)
+
+		return tradable_figi_list
+
+
+	async def get_statuses_raw(self, figi_list):
+		wanted_status = [SecurityTradingStatus.SECURITY_TRADING_STATUS_NORMAL_TRADING, SecurityTradingStatus.SECURITY_TRADING_STATUS_DEALER_NORMAL_TRADING]
+		print(f"Figi list to get statuses {figi_list}")
+		statuses = await self.client.market_data.get_trading_statuses(instrument_ids=figi_list)
+		print(f"{statuses.trading_statuses}")
+
+
+	async def get_bid_ask(self, figi):
+		orderbook = await self.client.market_data.get_order_book(instrument_id=figi, depth=1)
+		bid = orderbook.bids[0].price
+		ask = orderbook.asks[0].price
+		print(f"Current bid/ask for {figi} = {bid} / {ask}")
+		return (bid, ask)
 
 
 class StreamMonitor():

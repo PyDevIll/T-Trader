@@ -180,7 +180,8 @@ class InstrumentMonitor:
 		price = self.bid
 		lots = self.lots
 		print(f"BUY {ticker_figi.ticker(figi)} for {quotation_to_decimal(price)}")
-		order_id = await self.order_manager._post_order(figi, price, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
+		await asyncio.sleep(5)
+		order_id = await self.order_manager.post_order(figi, price, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
 		if order_id:
 			return order_id
 
@@ -190,7 +191,8 @@ class InstrumentMonitor:
 		figi = self.figi
 		lots = self.lots
 		print(f"BUY STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price_quotation)}")
-		order_id = await self.order_manager._post_order(figi, price_quotation, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_BUY, lots)
+		await asyncio.sleep(5)
+		order_id = await self.order_manager.post_order(figi, price_quotation, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_BUY, lots)
 		if order_id:
 			return order_id
 
@@ -201,7 +203,8 @@ class InstrumentMonitor:
 		price = self.ask
 		lots = self.lots
 		print(f"SELL {ticker_figi.ticker(figi)} for {quotation_to_decimal(price)}")
-		order_id = await self.order_manager._post_order(figi, price, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
+		await asyncio.sleep(5)
+		order_id = await self.order_manager.post_order(figi, price, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
 		if order_id:
 			return order_id
 
@@ -211,7 +214,8 @@ class InstrumentMonitor:
 		figi = self.figi
 		lots = self.lots
 		print(f"SELL STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price_quotation)}")
-		order_id = await self.order_manager._post_order(figi, price_quotation, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_SELL, lots)
+		await asyncio.sleep(5)
+		order_id = await self.order_manager.post_order(figi, price_quotation, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_SELL, lots)
 		if order_id:
 			return order_id
 
