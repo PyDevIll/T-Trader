@@ -130,8 +130,7 @@ class Scheduler:
 		self.order_manager = order_manager
 		self.ticker_list = []
 		self.prev_ticker_list = None
-		self.weekday = weekday_str[now().weekday()]
-		self.last_hour = now().hour
+		self.next_trade_time = now().replace(minute=0) + timedelta(hours=1)
 
 
 	async def timer(self):
@@ -146,15 +145,17 @@ class Scheduler:
 
 
 	async def process_trades(self):
-		# 5 minutes before hour end
-		next_hour_in_5min = (now() + timedelta(minutes=5, seconds=59)).hour
-		self.weekday = weekday_str[(now() + timedelta(minutes=5, seconds=59)).weekday()]
-		print(f"{now().strftime("%H:%M")} > {self.weekday}, {now().hour}")
+		hour = str(self.next_trade_time.hour)
+		weekday = weekday_str[self.next_trade_time.weekday()]
+		print(f"Now: {now().strftime("%d, %H:%M")}. Next trade at: {self.next_trade_time.strftime("%d, %H:%M")} > {weekday}, {hour}")
 
-		if now().hour != next_hour_in_5min:
+		# 5 minutes before trade time
+		if (now() < self.next_trade_time) and (self.next_trade_time - now() <= timedelta(minutes=5)):
 			self.prev_ticker_list = self.ticker_list[:]
-			if str(next_hour_in_5min) in self.schedule_tab:
-				self.ticker_list = self.schedule_tab[str(next_hour_in_5min)][self.weekday]
+			if hour in self.schedule_tab:
+				print(f"Some tickers are scheduled at {weekday}, {hour}")
+				self.ticker_list = self.schedule_tab[hour][weekday]
+				print(self.ticker_list)
 				await self.check_trading_statuses()
 			else:
 				self.ticker_list = []
@@ -162,9 +163,12 @@ class Scheduler:
 			await self.sell_scheduled()
 
 		# new hour started
-		if self.last_hour != now().hour:
+		if (now() >= self.next_trade_time) and (now() - self.next_trade_time <= timedelta(minutes=5)):
 			await self.buy_scheduled()
-			self.last_hour = now().hour
+			self.next_trade_time = now().replace(minute=0) + timedelta(hours=1)
+			# at 15.55 UTC (22.55 NSK) no trading on the exchange
+			if self.next_trade_time.hour == 16:
+				self.next_trade_time += timedelta(minutes=5, seconds=50)
 		...
 
 
@@ -301,7 +305,7 @@ class now_mock():
 	@classmethod
 	def set_time(cls, new_time):
 		cls.delta_time = (_now() - new_time)
-
+		return cls.now()
 
 
 async def test_scheduler():
@@ -320,104 +324,79 @@ async def test_scheduler():
 			balance = await account_manager.get_balance()
 			print(f"Paid in. Balance = {balance}")
 
+		trade_times = [
+			now_mock.set_time(_now().replace(day=12, hour=3, minute=49)),
+			now_mock.set_time(_now().replace(day=12, hour=3, minute=50)),
+			now_mock.set_time(_now().replace(day=12, hour=3, minute=55)),
+			now_mock.set_time(_now().replace(day=12, hour=4, minute=0)),
+			now_mock.set_time(_now().replace(day=12, hour=4, minute=5)),
 
-		# scheduler.ticker_list = ticker_list
-		ticker_list = schedule_tab_shares["4"]["Tue"]
-		print(ticker_list)
-		figi_list = [await share_ticker_to_figi(client, ticker) for ticker in ticker_list]
-		print(figi_list)
-		tradable_figi_list = await order_manager.get_tradables_from(figi_list)
-		print(tradable_figi_list)
-		ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
-		print(ticker_list)
+			now_mock.set_time(_now().replace(day=12, hour=4, minute=49)),
+			now_mock.set_time(_now().replace(day=12, hour=4, minute=50)),
+			now_mock.set_time(_now().replace(day=12, hour=4, minute=55)),
+			now_mock.set_time(_now().replace(day=12, hour=5, minute=0)),
+			now_mock.set_time(_now().replace(day=12, hour=5, minute=5)),
 
-		input("Moving to trades...")
+			now_mock.set_time(_now().replace(day=12, hour=5, minute=49)),
+			now_mock.set_time(_now().replace(day=12, hour=5, minute=50)),
+			now_mock.set_time(_now().replace(day=12, hour=5, minute=55)),
+			now_mock.set_time(_now().replace(day=12, hour=6, minute=0)),
+			now_mock.set_time(_now().replace(day=12, hour=6, minute=5)),
 
-		now_mock.set_time(_now().replace(day=12, hour=3, minute=50))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		now_mock.set_time(_now().replace(day=12, hour=3, minute=55))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		now_mock.set_time(_now().replace(day=12, hour=4, minute=0))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
+			now_mock.set_time(_now().replace(day=12, hour=6, minute=49)),
+			now_mock.set_time(_now().replace(day=12, hour=6, minute=50)),
+			now_mock.set_time(_now().replace(day=12, hour=6, minute=55)),
+			now_mock.set_time(_now().replace(day=12, hour=7, minute=0)),
+			now_mock.set_time(_now().replace(day=12, hour=7, minute=5)),
 
-		input("Moving to next hour...")
+			now_mock.set_time(_now().replace(day=11, hour=15, minute=49)),
+			now_mock.set_time(_now().replace(day=11, hour=15, minute=50)),
+			now_mock.set_time(_now().replace(day=11, hour=15, minute=55)),
+			now_mock.set_time(_now().replace(day=11, hour=16, minute=0)),
+			now_mock.set_time(_now().replace(day=11, hour=16, minute=5)),
+			now_mock.set_time(_now().replace(day=11, hour=16, minute=10)),
 
-		ticker_list = schedule_tab_shares["5"]["Tue"]
-		print(ticker_list)
-		figi_list = [await share_ticker_to_figi(client, ticker) for ticker in ticker_list]
-		print(figi_list)
-		tradable_figi_list = await order_manager.get_tradables_from(figi_list)
-		print(tradable_figi_list)
-		ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
-		print(ticker_list)
+			now_mock.set_time(_now().replace(day=11, hour=16, minute=49)),
+			now_mock.set_time(_now().replace(day=11, hour=16, minute=50)),
+			now_mock.set_time(_now().replace(day=11, hour=16, minute=55)),
+			now_mock.set_time(_now().replace(day=11, hour=17, minute=0)),
+			now_mock.set_time(_now().replace(day=11, hour=17, minute=5)),
+			now_mock.set_time(_now().replace(day=11, hour=17, minute=10)),
 
-		input("Moving to trades...")
+			now_mock.set_time(_now().replace(day=11, hour=17, minute=49)),
+			now_mock.set_time(_now().replace(day=11, hour=17, minute=50)),
+			now_mock.set_time(_now().replace(day=11, hour=17, minute=55)),
+			now_mock.set_time(_now().replace(day=11, hour=18, minute=0)),
+			now_mock.set_time(_now().replace(day=11, hour=18, minute=5)),
+			now_mock.set_time(_now().replace(day=11, hour=18, minute=10)),
+		]
 
-		now_mock.set_time(_now().replace(day=12, hour=4, minute=50))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		now_mock.set_time(_now().replace(day=12, hour=4, minute=55))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		now_mock.set_time(_now().replace(day=12, hour=5, minute=0))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
+		scheduler.next_trade_time = trade_times[0].replace(minute=0) + timedelta(hours=1)
+		for mock_time in trade_times:
 
-		input("Moving to next hour")
+			print(scheduler.ticker_list)
+			figi_list = [await share_ticker_to_figi(client, ticker) for ticker in scheduler.ticker_list]
+			print(figi_list)
+			tradable_figi_list = await order_manager.get_tradables_from(figi_list)
+			print(f"Tradable figis: {tradable_figi_list}")
+			ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
+			print(f"Tradable tickers: {ticker_list}")
 
-		ticker_list = schedule_tab_shares["6"]["Tue"]
-		print(ticker_list)
-		figi_list = [await share_ticker_to_figi(client, ticker) for ticker in ticker_list]
-		print(figi_list)
-		tradable_figi_list = await order_manager.get_tradables_from(figi_list)
-		print(tradable_figi_list)
-		ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
-		print(ticker_list)
+			input("Moving to trades...")
 
-		input("Moving to trades...")
+			now_mock.set_time(mock_time)
+			print(f"{now()}. Running trades...")
+			await scheduler.process_trades()
 
-		now_mock.set_time(_now().replace(day=12, hour=5, minute=50))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		now_mock.set_time(_now().replace(day=12, hour=5, minute=55))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		now_mock.set_time(_now().replace(day=12, hour=6, minute=0))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
+			input("Moving to next time...")
 
-		input("Moving to next hour")
-
-		ticker_list = schedule_tab_shares["7"]["Tue"]
-		print(ticker_list)
-		figi_list = [await share_ticker_to_figi(client, ticker) for ticker in ticker_list]
-		print(figi_list)
-		tradable_figi_list = await order_manager.get_tradables_from(figi_list)
-		print(tradable_figi_list)
-		ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
-		print(ticker_list)
-
-		input("Moving to trades...")
-
-		now_mock.set_time(_now().replace(day=12, hour=6, minute=50))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		now_mock.set_time(_now().replace(day=12, hour=6, minute=55))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		now_mock.set_time(_now().replace(day=12, hour=7, minute=0))
-		print(f"{now()}. Running trades...")
-		await scheduler.process_trades()
-		print("Test completed")
+		input("Test completed")
 
 
 if __name__ == "__main__":
 	ticker_figi.init()
-	# now = now_mock.now
-	# asyncio.run(test_scheduler())
+	now = now_mock.now
+	asyncio.run(test_scheduler())
 
 	try:
 		asyncio.run(scheduled_trading())
