@@ -31,16 +31,6 @@ from decimal import Decimal
 # datetime.weekday() = 0..6
 weekday_str = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
-class Weekday(Enum):
-	Mon = 0
-	Tue = 1
-	Wed = 2
-	Thu = 3
-	Fri = 4
-	Sat = 5
-	Sun = 6
-
-# fill-in figis
 # check tickers for trading availablility
 schedule_tab_shares = {
 	"4":
@@ -131,16 +121,19 @@ class Scheduler:
 		self.ticker_list = []
 		self.prev_ticker_list = None
 		self.next_trade_time = now().replace(minute=0) + timedelta(hours=1)
+		# at 15.55 UTC (22.55 NSK) no trading on the exchange
+		if self.next_trade_time.hour == 16:
+			self.next_trade_time += timedelta(minutes=5)
 
 
 	async def timer(self):
 		while True:
 			await everyNMinutes()
-			try:
-				await self.process_trades()
-			except Exception as e:
-				inspect(e)
-				self.timer_task.cancel()
+		# try:
+			await self.process_trades()
+		# except Exception as e:
+		# inspect(e)
+		# self.timer_task.cancel()
 		...
 
 
@@ -168,7 +161,7 @@ class Scheduler:
 			self.next_trade_time = now().replace(minute=0) + timedelta(hours=1)
 			# at 15.55 UTC (22.55 NSK) no trading on the exchange
 			if self.next_trade_time.hour == 16:
-				self.next_trade_time += timedelta(minutes=5, seconds=50)
+				self.next_trade_time += timedelta(minutes=5)
 		...
 
 
@@ -324,30 +317,36 @@ async def test_scheduler():
 			balance = await account_manager.get_balance()
 			print(f"Paid in. Balance = {balance}")
 
-		trade_times = [
-			now_mock.set_time(_now().replace(day=12, hour=3, minute=49)),
-			now_mock.set_time(_now().replace(day=12, hour=3, minute=50)),
-			now_mock.set_time(_now().replace(day=12, hour=3, minute=55)),
-			now_mock.set_time(_now().replace(day=12, hour=4, minute=0)),
-			now_mock.set_time(_now().replace(day=12, hour=4, minute=5)),
+		trade_times = []
+		# 	now_mock.set_time(_now().replace(day=12, hour=3, minute=49)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=3, minute=50)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=3, minute=55)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=4, minute=0)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=4, minute=5)),
 
-			now_mock.set_time(_now().replace(day=12, hour=4, minute=49)),
-			now_mock.set_time(_now().replace(day=12, hour=4, minute=50)),
-			now_mock.set_time(_now().replace(day=12, hour=4, minute=55)),
-			now_mock.set_time(_now().replace(day=12, hour=5, minute=0)),
-			now_mock.set_time(_now().replace(day=12, hour=5, minute=5)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=4, minute=49)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=4, minute=50)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=4, minute=55)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=5, minute=0)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=5, minute=5)),
 
-			now_mock.set_time(_now().replace(day=12, hour=5, minute=49)),
-			now_mock.set_time(_now().replace(day=12, hour=5, minute=50)),
-			now_mock.set_time(_now().replace(day=12, hour=5, minute=55)),
-			now_mock.set_time(_now().replace(day=12, hour=6, minute=0)),
-			now_mock.set_time(_now().replace(day=12, hour=6, minute=5)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=5, minute=49)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=5, minute=50)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=5, minute=55)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=6, minute=0)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=6, minute=5)),
 
-			now_mock.set_time(_now().replace(day=12, hour=6, minute=49)),
-			now_mock.set_time(_now().replace(day=12, hour=6, minute=50)),
-			now_mock.set_time(_now().replace(day=12, hour=6, minute=55)),
-			now_mock.set_time(_now().replace(day=12, hour=7, minute=0)),
-			now_mock.set_time(_now().replace(day=12, hour=7, minute=5)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=6, minute=49)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=6, minute=50)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=6, minute=55)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=7, minute=0)),
+		# 	now_mock.set_time(_now().replace(day=12, hour=7, minute=5)),
+		# ]
+
+
+		trade_times_2 = [
+			now_mock.set_time(_now().replace(day=11, hour=14, minute=55)),
+			now_mock.set_time(_now().replace(day=11, hour=15, minute=0)),
 
 			now_mock.set_time(_now().replace(day=11, hour=15, minute=49)),
 			now_mock.set_time(_now().replace(day=11, hour=15, minute=50)),
@@ -362,17 +361,34 @@ async def test_scheduler():
 			now_mock.set_time(_now().replace(day=11, hour=17, minute=0)),
 			now_mock.set_time(_now().replace(day=11, hour=17, minute=5)),
 			now_mock.set_time(_now().replace(day=11, hour=17, minute=10)),
-
-			now_mock.set_time(_now().replace(day=11, hour=17, minute=49)),
-			now_mock.set_time(_now().replace(day=11, hour=17, minute=50)),
-			now_mock.set_time(_now().replace(day=11, hour=17, minute=55)),
-			now_mock.set_time(_now().replace(day=11, hour=18, minute=0)),
-			now_mock.set_time(_now().replace(day=11, hour=18, minute=5)),
-			now_mock.set_time(_now().replace(day=11, hour=18, minute=10)),
 		]
 
-		scheduler.next_trade_time = trade_times[0].replace(minute=0) + timedelta(hours=1)
-		for mock_time in trade_times:
+		if trade_times:
+			scheduler.next_trade_time = trade_times[0].replace(minute=0) + timedelta(hours=1)
+			for mock_time in trade_times:
+
+				print(scheduler.ticker_list)
+				figi_list = [await share_ticker_to_figi(client, ticker) for ticker in scheduler.ticker_list]
+				print(figi_list)
+				tradable_figi_list = await order_manager.get_tradables_from(figi_list)
+				print(f"Tradable figis: {tradable_figi_list}")
+				ticker_list = [ticker_figi.ticker(figi) for figi in tradable_figi_list]
+				print(f"Tradable tickers: {ticker_list}")
+
+				input("Moving to trades...")
+
+				now_mock.set_time(mock_time)
+				print(f"{now()}. Running trades...")
+				await scheduler.process_trades()
+
+				input("Moving to next time...")
+
+		input("Morning test completed")
+	# now = now_mock.now
+	# asyncio.run(test_scheduler())
+
+		scheduler.next_trade_time = trade_times_2[0].replace(minute=0) + timedelta(hours=1)
+		for mock_time in trade_times_2:
 
 			print(scheduler.ticker_list)
 			figi_list = [await share_ticker_to_figi(client, ticker) for ticker in scheduler.ticker_list]
@@ -395,11 +411,17 @@ async def test_scheduler():
 
 if __name__ == "__main__":
 	ticker_figi.init()
-	now = now_mock.now
-	asyncio.run(test_scheduler())
+	# now = now_mock.now
+	# asyncio.run(test_scheduler())
 
-	try:
-		asyncio.run(scheduled_trading())
-	except KeyboardInterrupt:
-		print("KeyboardInterrupt handled")
+# try:
+	asyncio.run(scheduled_trading())
+# except KeyboardInterrupt:
+	print("KeyboardInterrupt handled")
 
+
+"""
+make posting multiple orders by gathering multiple async tasks with asyncio.gather(...)
+and handle timeouts and limits inside every task as stream retrying with delay like in t_order_manager.py
+
+"""
