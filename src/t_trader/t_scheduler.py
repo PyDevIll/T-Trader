@@ -162,6 +162,9 @@ class Scheduler:
 			# at 15.55 UTC (22.55 NSK) no trading on the exchange
 			if self.next_trade_time.hour == 16:
 				self.next_trade_time += timedelta(minutes=5)
+			# at 3:55 UTC (10.55 NSK) is too early for trading
+			if self.next_trade_time.hour == 4:
+				self.next_trade_time += timedelta(minutes=5)
 		...
 
 
@@ -183,7 +186,7 @@ class Scheduler:
 				print(f"Keeping {ticker}. No BUY")
 				continue
 			print("Little delay between orders...")
-			await asyncio.sleep(5)
+			await asyncio.sleep(1)
 			order_id = await self.buy(ticker)
 			if order_id:
 				self.orders_by_ticker[ticker] = order_id
@@ -205,7 +208,7 @@ class Scheduler:
 				print(f"Keeping {ticker}. No SELL")
 				continue
 			print("Little delay between orders...")
-			await asyncio.sleep(5)
+			await asyncio.sleep(1)
 			order_id = await self.sell(ticker, order_id)
 			if order_id:
 				self.orders_by_ticker[ticker] = None	# to be deleted
@@ -411,10 +414,11 @@ async def test_scheduler():
 
 if __name__ == "__main__":
 	ticker_figi.init()
-	# now = now_mock.now
-	# asyncio.run(test_scheduler())
+	now = now_mock.now
+	asyncio.run(test_scheduler())
 
 # try:
+	now = _now
 	asyncio.run(scheduled_trading())
 # except KeyboardInterrupt:
 	print("KeyboardInterrupt handled")

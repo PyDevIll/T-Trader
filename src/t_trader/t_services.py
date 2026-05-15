@@ -376,7 +376,8 @@ class StreamMonitor():
 			else:
 				retry_count = 0
 		print("Stream ended by setting stop flag")
-		self.input_task.cancel()
+		if self.input_task:
+			self.input_task.cancel()
 		self.running_task.cancel()
 
 	async def _monitor(self):

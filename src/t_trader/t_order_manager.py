@@ -383,15 +383,6 @@ class OrderMonitor(StreamMonitor):
 			self.stream.stop()
 
 
-async def test_order_manager():
-	load_dotenv()
-	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
-		account_manager = await AccountManager(client).connect()
-		order_manager = OrderManager(client, account_manager.account)
-
-
-	...
-
 
 async def test_order_monitor():
 	load_dotenv()
@@ -464,4 +455,10 @@ Candles are updated later, after trade moment. How to use trade events in tradin
 07.05.2026
 Instruments update their trading status only on startup and never refreshes it
 Trading status is not needed? When the instrument is not trading - there's no any stream data for it
+
+15.05.2026
+Make closing orders at MA
+Make limiting some instruments to only buy and only sell
+Monitor limit orders firing by OrdersStreamService (order_state_stream (?))
+
 """
