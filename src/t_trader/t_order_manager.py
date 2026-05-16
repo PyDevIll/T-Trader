@@ -67,7 +67,7 @@ def MA(period, candle_history):
 
 
 class InstrumentMonitor:
-	def __init__(self, client, figi, type, candle_interval, period, lots=1):
+	def __init__(self, client, figi, type, candle_interval, period, lots=1, allow_buying=True, allow_selling=True):
 		self.client = client
 		self.figi = figi
 		self.type = type
@@ -84,6 +84,9 @@ class InstrumentMonitor:
 		self.lo_order = None
 		# self.is_trading = True
 		self.order_manager = None
+		#	 behaviour at peak values
+		self.allow_buying = allow_buying
+		self.allow_selling = allow_selling
 
 
 	async def update_candles(self):
@@ -170,8 +173,10 @@ class InstrumentMonitor:
 
 		sell_quotation = self.quantize(self.ma + self.ma * self.deviation_percent)
 		buy_quotation = self.quantize(self.ma - self.ma * self.deviation_percent)
-		self.hi_order = await self._move_order(self.hi_order, sell_quotation, "SELL")
-		self.lo_order = await self._move_order(self.lo_order, buy_quotation, "BUY")
+		if self.allow_selling:
+			self.hi_order = await self._move_order(self.hi_order, sell_quotation, "SELL")
+		if self.allow_buying:
+			self.lo_order = await self._move_order(self.lo_order, buy_quotation, "BUY")
 
 
 	# moved to InstrumentMonitor
@@ -325,16 +330,24 @@ class OrderMonitor(StreamMonitor):
 
 				if order.direction == OrderDirection.ORDER_DIRECTION_BUY:
 					if not self.instrument_list_by_figi[order.figi].lo_order:
-						self.instrument_list_by_figi[order.figi].lo_order = order.order_id
-						print(f"[green bold]FOUND[/] lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+						if self.allow_buying:
+							self.instrument_list_by_figi[order.figi].lo_order = order.order_id
+							print(f"[green bold]FOUND[/] lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+						else:
+							await self.order_manager.cancel_order(order.order_id)
+							print(f"[yellow bold]CANCELLED[/] [bold blue]BUY[/] for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}. Buying not allowed")
 					else:
 						# more than one BUY order
 						await self.order_manager.cancel_order(order.order_id)
 						print(f"[yellow bold]CANCELLED[/] dup lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
 				elif order.direction == OrderDirection.ORDER_DIRECTION_SELL:
 					if not self.instrument_list_by_figi[order.figi].hi_order:
-						self.instrument_list_by_figi[order.figi].hi_order = order.order_id
-						print(f"[green bold]FOUND[/] hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+						if self.allow_selling:
+							self.instrument_list_by_figi[order.figi].hi_order = order.order_id
+							print(f"[green bold]FOUND[/] hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+						else:
+							await self.order_manager.cancel_order(order.order_id)
+							print(f"[yellow bold]CANCELLED[/] [bold red]SELL[/] for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}. Selling not allowed")
 					else:
 						# more than one SELL order
 						await self.order_manager.cancel_order(order.order_id)
@@ -397,7 +410,8 @@ async def test_order_monitor():
 				type="etf",
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
-				lots=1
+				lots=1,
+				allow_selling=False
 			)
 		)
 		order_monitor.add_instrument(
@@ -407,7 +421,8 @@ async def test_order_monitor():
 				type="etf",
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
-				lots=1
+				lots=1,
+				allow_selling=False
 			)
 		)
 		order_monitor.add_instrument(
@@ -457,8 +472,11 @@ Instruments update their trading status only on startup and never refreshes it
 Trading status is not needed? When the instrument is not trading - there's no any stream data for it
 
 15.05.2026
-Make closing orders at MA
+Make closing positions at MA
 Make limiting some instruments to only buy and only sell
 Monitor limit orders firing by OrdersStreamService (order_state_stream (?))
+
+16.05.2026
+Widely test OrderManager on mock trading data before making TUI with Rich.table Rich.layout and Rich.live
 
 """
