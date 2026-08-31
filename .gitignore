@@ -1,3 +1,4 @@
 .env
+invest_token
 src/t_trader/__pycache__/
 tests/__pycache__/
