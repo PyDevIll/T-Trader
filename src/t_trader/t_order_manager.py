@@ -56,6 +56,7 @@ from t_services import (
 	share_ticker_to_figi
 )
 from t_services import ticker_figi_cache as ticker_figi
+from t_regime import load_regime_profile
 
 
 def MA(period, candle_history):
@@ -67,7 +68,8 @@ def MA(period, candle_history):
 
 
 class InstrumentMonitor:
-	def __init__(self, client, figi, type, candle_interval, period, lots=1, allow_buying=True, allow_selling=True):
+	def __init__(self, client, figi, type, candle_interval, period, lots=1, allow_buying=True, allow_selling=True,
+				 load_regime=False, band_atr_mult=Decimal(0)):
 		self.client = client
 		self.figi = figi
 		self.type = type
@@ -87,6 +89,14 @@ class InstrumentMonitor:
 		#	 behaviour at peak values
 		self.allow_buying = allow_buying
 		self.allow_selling = allow_selling
+		#	 regime-adaptive bracket
+		self.load_regime = load_regime
+		self.band_atr_mult = band_atr_mult
+		self.regime = None
+		self.regime_break = False
+		self.trend_ok = True
+		self.ref_high = None
+		self.worst_dd = Decimal(0)
 
 
 	async def update_candles(self):
@@ -131,6 +141,52 @@ class InstrumentMonitor:
 			print(f"Cannot update bid/ask for {ticker_figi.ticker(self.figi)}: {e}")
 
 
+	def ATR(self, period=14):
+		"""Average True Range in price units over the current candle history."""
+		hist = self.candle_history
+		if len(hist) < period + 1:
+			return None
+		trs = []
+		for i in range(1, len(hist)):
+			h = quotation_to_decimal(hist[i].high)
+			l = quotation_to_decimal(hist[i].low)
+			pc = quotation_to_decimal(hist[i - 1].close)
+			trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+		return sum(trs[-period:]) / period
+
+
+	def update_regime(self, profile):
+		self.regime = profile
+		if profile is None:
+			self.trend_ok = True
+			self.regime_break = False
+			return
+		self.trend_ok = profile.trend_ok
+		self.ref_high = profile.ref_high
+		self.worst_dd = profile.worst_dd
+		self.regime_break = False
+		print(f"[green]Regime[/] {profile.describe()}")
+
+
+	def check_regime_break(self):
+		"""Regime break = current drawdown from the reference high is deeper
+		than the worst dip that historically recovered. Disables buying."""
+		if self.regime is None or not self.ref_high:
+			self.regime_break = False
+			return
+		price = quotation_to_decimal(self.bid) if self.bid else None
+		if price is None and self.candle_history:
+			price = quotation_to_decimal(self.candle_history[-1].close)
+		if price is None:
+			return
+		drawdown = price / self.ref_high - 1
+		broke = drawdown < self.worst_dd
+		if broke and not self.regime_break:
+			print(f"[red]REGIME BREAK[/] {ticker_figi.ticker(self.figi)} "
+				  f"drawdown={drawdown} < worst_dd={self.worst_dd}. Cancelling BUY bracket.")
+		self.regime_break = broke
+
+
 	def quantize(self, price_decimal):
 		quantized_price_decimal = (price_decimal // quotation_to_decimal(self.min_price_increment)) * quotation_to_decimal(self.min_price_increment)
 		quantized_price_quotation = decimal_to_quotation(quantized_price_decimal)
@@ -171,12 +227,26 @@ class InstrumentMonitor:
 		# if not self.is_trading:
 		# 	return
 
-		sell_quotation = self.quantize(self.ma + self.ma * self.deviation_percent)
-		buy_quotation = self.quantize(self.ma - self.ma * self.deviation_percent)
+		self.check_regime_break()
+
+		deviation = self.deviation_percent
+		if self.band_atr_mult:
+			atr = self.ATR()
+			if atr and self.ma:
+				deviation = max(deviation, self.band_atr_mult * atr / self.ma)
+
 		if self.allow_selling:
+			sell_quotation = self.quantize(self.ma + self.ma * deviation)
 			self.hi_order = await self._move_order(self.hi_order, sell_quotation, "SELL")
-		if self.allow_buying:
+
+		if self.allow_buying and self.trend_ok and not self.regime_break:
+			buy_quotation = self.quantize(self.ma - self.ma * deviation)
 			self.lo_order = await self._move_order(self.lo_order, buy_quotation, "BUY")
+		elif self.lo_order:
+			print(f"[yellow]CANCELLED[/] BUY bracket for {ticker_figi.ticker(self.figi)} "
+				  f"(trend_ok={self.trend_ok}, regime_break={self.regime_break})")
+			await self.order_manager.cancel_order(self.lo_order)
+			self.lo_order = None
 
 
 	# moved to InstrumentMonitor
@@ -289,6 +359,13 @@ class OrderMonitor(StreamMonitor):
 			print(await self.account_manager.get_balance())
 		elif user_input == 'p':
 			await self.account_manager.get_positions()
+		elif user_input == 'r':
+			inst = self.instrument_list_by_figi.get(figi)
+			if inst and getattr(inst, "load_regime", False):
+				profile = await load_regime_profile(self.client, figi, ticker_figi.ticker(figi))
+				inst.update_regime(profile)
+			else:
+				print("Regime loading not enabled for this instrument")
 		print("___\n")
 
 
@@ -319,6 +396,14 @@ class OrderMonitor(StreamMonitor):
 
 			i.min_price_increment = broker_instrument.min_price_increment
 			print(f"{ticker_figi.ticker(figi)} min price increment = {i.min_price_increment}")
+
+			if getattr(i, "load_regime", False):
+				try:
+					profile = await load_regime_profile(self.client, figi, ticker_figi.ticker(figi))
+				except Exception as e:
+					print(f"[yellow]Regime load failed for {ticker_figi.ticker(figi)}: {e}[/]")
+					profile = None
+				i.update_regime(profile)
 
 		# get hi/lo orders
 		orders = await self.order_manager.list_orders()
@@ -386,7 +471,8 @@ class OrderMonitor(StreamMonitor):
 					print(
 						f"[white on grey11][bold green]{ticker_figi.ticker(figi)}[/]: [bold]b[/] - BUY, [bold]s[/] - SELL; \t" +
 						f"[bold]General[/]: [bold]l[/] - LIST ORDERS, [bold]+[/] - PAY IN, " +
-						f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS, [bold]p[/] - POSITIONS", end='\r'
+						f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS, [bold]p[/] - POSITIONS, " +
+						f"[bold]r[/] - RELOAD REGIME", end='\r'
 					)
 
 		# stream error shouldn't stop monitor
@@ -411,7 +497,9 @@ async def test_order_monitor():
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
 				lots=1,
-				allow_selling=False
+				allow_selling=False,
+				load_regime=True,
+				band_atr_mult=Decimal("0.5")
 			)
 		)
 		order_monitor.add_instrument(
@@ -422,7 +510,9 @@ async def test_order_monitor():
 				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
 				period=6,
 				lots=1,
-				allow_selling=False
+				allow_selling=False,
+				load_regime=True,
+				band_atr_mult=Decimal("0.5")
 			)
 		)
 		order_monitor.add_instrument(
