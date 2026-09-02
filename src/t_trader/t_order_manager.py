@@ -3,9 +3,16 @@
 import t_services
 import asyncio
 import sys
+import os
+import json
+import threading
+import termios
+import tty
+import select
 
 from datetime import datetime, timedelta, time
 from decimal import Decimal
+from types import SimpleNamespace
 
 from t_tech.invest.async_services import AsyncServices
 from t_tech.invest.utils import (
@@ -40,12 +47,12 @@ from t_tech.invest.schemas import (
 	ReplaceOrderRequest
 )
 from t_tech.invest.exceptions import AioRequestError
-import json
 _print = print
 from rich import inspect, print
+from rich.console import Console
+from rich.live import Live
 from rich.prompt import Prompt
 from dotenv import load_dotenv
-import os
 from functools import lru_cache, reduce
 from t_services import (
 	StreamMonitor,
@@ -57,6 +64,14 @@ from t_services import (
 )
 from t_services import ticker_figi_cache as ticker_figi
 from t_regime import load_regime_profile
+from t_dashboard import build_dashboard
+
+LOG_FILE = "t_trader.log"
+
+
+def log(message):
+	with open(LOG_FILE, "a", encoding="utf-8") as f:
+		f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
 
 
 def MA(period, candle_history):
@@ -79,11 +94,13 @@ class InstrumentMonitor:
 		self.period = period	# period = candle_count
 		self.candle_history = []
 		self.min_price_increment = None
-		self.ma = Decimal(0)
+		self.ma = None
 		self.deviation_percent = Decimal(0.0015) # 0.15%
 		self.lots = lots
 		self.hi_order = None
 		self.lo_order = None
+		self.sell_limit = None
+		self.buy_limit = None
 		# self.is_trading = True
 		self.order_manager = None
 		#	 behaviour at peak values
@@ -116,7 +133,7 @@ class InstrumentMonitor:
 		# if no enough candles - increase from_ until len(candle) = period
 		while len(candles) < self.period:
 			from_ -= candle_interval_to_timedelta(self.candle_interval)
-			print(f"Not enough candles for {self.figi} ({len(candles)}). Getting candles from {from_}")
+			log(f"Not enough candles for {self.figi} ({len(candles)}). Getting candles from {from_}")
 			candles = (await self.client.market_data.get_candles(
 				instrument_id=self.figi,
 				from_=from_,
@@ -127,8 +144,7 @@ class InstrumentMonitor:
 
 		self.candle_history = candles
 		self.ma = MA(self.period, self.candle_history)
-		print(f"{ticker_figi.ticker(self.figi)}: {quotation_to_decimal(self.candle_history[-1].close)}")
-		print(f"MA({self.period}) = {self.ma}")
+		log(f"{ticker_figi.ticker(self.figi)}: close={quotation_to_decimal(self.candle_history[-1].close)} MA({self.period})={self.ma}")
 		return True
 
 
@@ -136,9 +152,9 @@ class InstrumentMonitor:
 		try:
 			self.bid = orderbook.bids[0].price
 			self.ask = orderbook.asks[0].price
-			print(f"{ticker_figi.ticker(self.figi)} bid/ask = {quotation_to_decimal(self.bid)} / {quotation_to_decimal(self.ask)}")
+			log(f"{ticker_figi.ticker(self.figi)} bid/ask = {quotation_to_decimal(self.bid)} / {quotation_to_decimal(self.ask)}")
 		except Exception as e:
-			print(f"Cannot update bid/ask for {ticker_figi.ticker(self.figi)}: {e}")
+			log(f"Cannot update bid/ask for {ticker_figi.ticker(self.figi)}: {e}")
 
 
 	def ATR(self, period=14):
@@ -165,7 +181,7 @@ class InstrumentMonitor:
 		self.ref_high = profile.ref_high
 		self.worst_dd = profile.worst_dd
 		self.regime_break = False
-		print(f"[green]Regime[/] {profile.describe()}")
+		log(f"[green]Regime[/] {profile.describe()}")
 
 
 	def check_regime_break(self):
@@ -182,7 +198,7 @@ class InstrumentMonitor:
 		drawdown = price / self.ref_high - 1
 		broke = drawdown < self.worst_dd
 		if broke and not self.regime_break:
-			print(f"[red]REGIME BREAK[/] {ticker_figi.ticker(self.figi)} "
+			log(f"[red]REGIME BREAK[/] {ticker_figi.ticker(self.figi)} "
 				  f"drawdown={drawdown} < worst_dd={self.worst_dd}. Cancelling BUY bracket.")
 		self.regime_break = broke
 
@@ -190,7 +206,7 @@ class InstrumentMonitor:
 	def quantize(self, price_decimal):
 		quantized_price_decimal = (price_decimal // quotation_to_decimal(self.min_price_increment)) * quotation_to_decimal(self.min_price_increment)
 		quantized_price_quotation = decimal_to_quotation(quantized_price_decimal)
-		print(f"Before quantizing: {price_decimal} / after: {quantized_price_quotation}")
+		log(f"Before quantizing: {price_decimal} / after: {quantized_price_quotation}")
 		return quantized_price_quotation
 
 
@@ -208,9 +224,9 @@ class InstrumentMonitor:
 			order = await self.order_manager.get_order(order_id)
 			if order and order.execution_report_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW:
 				price_difference = abs(money_to_decimal(order.initial_security_price) - quotation_to_decimal(price_quotation))
-				print(f" {order_type_str} LIMIT order for {ticker_figi.ticker(self.figi)} price diff = {price_difference}, min diff = {min_difference}")
+				log(f" {order_type_str} LIMIT order for {ticker_figi.ticker(self.figi)} price diff = {price_difference}, min diff = {min_difference}")
 				if price_difference > min_difference:
-					print("Order should be moved...")
+					log("Order should be moved...")
 					order_id = await self.order_manager.change_order(order_id, price_quotation, self.lots)
 					return order_id
 			else:
@@ -238,15 +254,18 @@ class InstrumentMonitor:
 		if self.allow_selling:
 			sell_quotation = self.quantize(self.ma + self.ma * deviation)
 			self.hi_order = await self._move_order(self.hi_order, sell_quotation, "SELL")
+			self.sell_limit = quotation_to_decimal(sell_quotation) if self.hi_order else None
 
 		if self.allow_buying and self.trend_ok and not self.regime_break:
 			buy_quotation = self.quantize(self.ma - self.ma * deviation)
 			self.lo_order = await self._move_order(self.lo_order, buy_quotation, "BUY")
+			self.buy_limit = quotation_to_decimal(buy_quotation) if self.lo_order else None
 		elif self.lo_order:
-			print(f"[yellow]CANCELLED[/] BUY bracket for {ticker_figi.ticker(self.figi)} "
+			log(f"[yellow]CANCELLED[/] BUY bracket for {ticker_figi.ticker(self.figi)} "
 				  f"(trend_ok={self.trend_ok}, regime_break={self.regime_break})")
 			await self.order_manager.cancel_order(self.lo_order)
 			self.lo_order = None
+			self.buy_limit = None
 
 
 	# moved to InstrumentMonitor
@@ -254,7 +273,7 @@ class InstrumentMonitor:
 		figi = self.figi
 		price = self.bid
 		lots = self.lots
-		print(f"BUY {ticker_figi.ticker(figi)} for {quotation_to_decimal(price)}")
+		log(f"BUY {ticker_figi.ticker(figi)} for {quotation_to_decimal(price)}")
 		await asyncio.sleep(5)
 		order_id = await self.order_manager.post_order(figi, price, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_BUY, lots)
 		if order_id:
@@ -265,7 +284,7 @@ class InstrumentMonitor:
 	async def buylimit(self, price_quotation):
 		figi = self.figi
 		lots = self.lots
-		print(f"BUY STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price_quotation)}")
+		log(f"BUY STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price_quotation)}")
 		await asyncio.sleep(5)
 		order_id = await self.order_manager.post_order(figi, price_quotation, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_BUY, lots)
 		if order_id:
@@ -277,7 +296,7 @@ class InstrumentMonitor:
 		figi = self.figi
 		price = self.ask
 		lots = self.lots
-		print(f"SELL {ticker_figi.ticker(figi)} for {quotation_to_decimal(price)}")
+		log(f"SELL {ticker_figi.ticker(figi)} for {quotation_to_decimal(price)}")
 		await asyncio.sleep(5)
 		order_id = await self.order_manager.post_order(figi, price, OrderType.ORDER_TYPE_MARKET, OrderDirection.ORDER_DIRECTION_SELL, lots)
 		if order_id:
@@ -288,7 +307,7 @@ class InstrumentMonitor:
 	async def selllimit(self, price_quotation):
 		figi = self.figi
 		lots = self.lots
-		print(f"SELL STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price_quotation)}")
+		log(f"SELL STOP {ticker_figi.ticker(figi)} at {quotation_to_decimal(price_quotation)}")
 		await asyncio.sleep(5)
 		order_id = await self.order_manager.post_order(figi, price_quotation, OrderType.ORDER_TYPE_LIMIT, OrderDirection.ORDER_DIRECTION_SELL, lots)
 		if order_id:
@@ -296,14 +315,69 @@ class InstrumentMonitor:
 
 
 
+class LineReader(threading.Thread):
+	"""Reads command lines in cbreak (raw, no echo) mode and reports them
+	to the event loop via the on_line callback."""
+
+	def __init__(self, on_line):
+		super().__init__(daemon=True, name="line-reader")
+		self.on_line = on_line
+		self.buffer = ""
+		self.running = True
+
+	def run(self):
+		fd = sys.stdin.fileno()
+		old_attr = termios.tcgetattr(fd)
+		try:
+			tty.setcbreak(fd)
+			attr = termios.tcgetattr(fd)
+			attr[3] = attr[3] & ~termios.ECHO
+			termios.tcsetattr(fd, termios.TCSANOW, attr)
+			while self.running:
+				r, _, _ = select.select([fd], [], [], 0.1)
+				if not r:
+					continue
+				data = os.read(fd, 1)
+				if not data:
+					continue
+				ch = data.decode(errors="ignore")
+				if ch in ("\r", "\n"):
+					line = self.buffer
+					self.buffer = ""
+					if line.strip():
+						self.on_line(line.strip())
+				elif ch in ("\x7f", "\b"):
+					self.buffer = self.buffer[:-1]
+				elif ch == "\x03":
+					self.on_line("q")
+					self.running = False
+				elif ch == "\x1b":
+					pass
+				elif ch.isprintable():
+					self.buffer += ch
+		finally:
+			termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+
+	def stop(self):
+		self.running = False
+
+
 class OrderMonitor(StreamMonitor):
-	def __init__(self, client, order_manager):
+	def __init__(self, client, order_manager, portfolio_refresh_seconds=10):
 		super().__init__(client)
 		self.instrument_list_by_figi = {}	# {figi: InstrumentMonitor}
 		self.order_manager = order_manager
 		self.account_manager = order_manager.account_manager
 		self.last_market_response = None
-		self.last_user_input = None
+		self.console = Console()
+		self.live = None
+		self.balance = Decimal(0)
+		self.positions = []
+		self.status = ""
+		self.prompt = ""
+		self.reader = None
+		self.portfolio_refresh_seconds = portfolio_refresh_seconds
+		self.loop = None
 		...
 
 
@@ -322,51 +396,124 @@ class OrderMonitor(StreamMonitor):
 
 
 	async def get_user_input(self):
-		while True:
-			user_input = await asyncio.to_thread(input, "")
-			await self.process_user_action(user_input)
+		self.loop = asyncio.get_running_loop()
+		self.reader = LineReader(self._submit_command)
+		self.reader.start()
+
+
+	def _submit_command(self, line):
+		asyncio.run_coroutine_threadsafe(self.process_user_action(line), self.loop)
 
 
 	async def process_user_action(self, user_input):
-		if not self.last_market_response:
-			return
-		market_response = self.last_market_response
+		parts = user_input.split()
+		cmd = parts[0].lower()
+		arg = parts[1] if len(parts) > 1 else None
 
-		try:
-			figi = (market_response.orderbook or market_response.last_price or market_response.candle).figi
-		except:
-			print("Market response has no figi defined")
-			inspect(market_response)
-			input()
-
-		print(f"You've entered '{user_input}'")
-		if user_input == 'b':
-			print(f'BUYING {ticker_figi.ticker(figi)}')
-			await self.instrument_list_by_figi[figi].buy()
-		elif user_input == 's':
-			print(f'SELLING {ticker_figi.ticker(figi)}')
-			await self.instrument_list_by_figi[figi].sell()
-		elif user_input == 'l':
-			print('LISTING ORDERS:')
-			await self.order_manager.list_orders()
-		elif user_input == '+':
-			amount = Decimal(Prompt.ask("Pay in amount (10000)", default="10000"))
-			await self.account_manager.pay_in(amount)
-			print(await self.account_manager.get_balance())
-		elif user_input == 'o':
-			await self.account_manager.account_operations(from_=now() - timedelta(days=1))
-		elif user_input == 'a':
-			print(await self.account_manager.get_balance())
-		elif user_input == 'p':
-			await self.account_manager.get_positions()
-		elif user_input == 'r':
-			inst = self.instrument_list_by_figi.get(figi)
-			if inst and getattr(inst, "load_regime", False):
-				profile = await load_regime_profile(self.client, figi, ticker_figi.ticker(figi))
-				inst.update_regime(profile)
+		if cmd in ("add",):
+			if not arg:
+				self.status = "Usage: add TICKER"
 			else:
-				print("Regime loading not enabled for this instrument")
-		print("___\n")
+				await self.add_ticker(arg)
+		elif cmd in ("b", "s"):
+			figi, _ = await self._resolve_figi(arg) if arg else (self._last_figi(), None)
+			if not figi:
+				self.status = "Unknown ticker. Usage: b TICKER"
+			else:
+				inst = self.instrument_list_by_figi.get(figi)
+				ticker = ticker_figi.ticker(figi) or figi
+				if inst is None:
+					self.status = f"{ticker} is not in the monitor. Use: add {ticker}"
+				elif cmd == "b":
+					await inst.buy()
+					self.status = f"BUY market {ticker} placed"
+				else:
+					await inst.sell()
+					self.status = f"SELL market {ticker} placed"
+		elif cmd == "r":
+			figi, _ = await self._resolve_figi(arg) if arg else (self._last_figi(), None)
+			inst = self.instrument_list_by_figi.get(figi) if figi else None
+			if not figi or inst is None:
+				self.status = "Unknown ticker. Usage: r TICKER"
+			elif getattr(inst, "load_regime", False):
+				try:
+					profile = await load_regime_profile(self.client, figi, ticker_figi.ticker(figi))
+				except Exception as e:
+					log(f"Regime reload failed for {ticker_figi.ticker(figi)}: {e}")
+					self.status = f"Regime reload failed: {e}"
+					profile = None
+				inst.update_regime(profile)
+				self.status = f"Regime reloaded for {ticker_figi.ticker(figi)}"
+			else:
+				self.status = "Regime loading not enabled for this instrument"
+		elif cmd == "+":
+			try:
+				amount = Decimal(arg) if arg else Decimal("10000")
+			except Exception:
+				self.status = "Usage: + AMOUNT"
+				return
+			await self.account_manager.pay_in(amount)
+			await self.refresh_portfolio()
+			self.status = f"Paid in {amount} RUB"
+		elif cmd in ("q", "quit"):
+			self.status = "Quitting..."
+			self.stop = True
+			if self.stream:
+				self.stream.stop()
+			if self.reader:
+				self.reader.stop()
+		elif cmd in ("h", "help"):
+			self.status = "add TICKER | b TICKER | s TICKER | r TICKER | + AMOUNT | q | h"
+		else:
+			self.status = f"Unknown command: {cmd} (try h)"
+		self.refresh()
+
+
+	def _last_figi(self):
+		try:
+			return (self.last_market_response.orderbook or self.last_market_response.last_price or self.last_market_response.candle).figi
+		except Exception:
+			return None
+
+
+	async def _resolve_figi(self, ticker):
+		ticker = ticker.upper()
+		figi = await etf_ticker_to_figi(self.client, ticker, verbose=False)
+		if figi:
+			return figi, "etf"
+		return await share_ticker_to_figi(self.client, ticker, verbose=False), "share"
+
+
+	async def add_ticker(self, ticker):
+		ticker = ticker.upper()
+		figi, type_ = await self._resolve_figi(ticker)
+		if not figi:
+			self.status = f"Ticker {ticker} not found"
+			return
+		if figi in self.instrument_list_by_figi:
+			self.status = f"{ticker} is already in the monitor"
+			return
+		instrument = InstrumentMonitor(
+			client=self.client,
+			figi=figi,
+			type=type_,
+			candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
+			period=6,
+			lots=1,
+			load_regime=True,
+			band_atr_mult=Decimal("0.5")
+		)
+		self.add_instrument(instrument)
+		try:
+			await self._init_single(instrument)
+		except Exception as e:
+			log(f"init failed for {ticker}: {e}")
+			del self.instrument_list_by_figi[figi]
+			self.status = f"init failed for {ticker}: {e}"
+			return
+		self.status = f"Added {ticker}"
+		if self.stream:
+			self.stream.stop()
 
 
 	async def process_stream_response(self, market_response, figi):
@@ -374,70 +521,139 @@ class OrderMonitor(StreamMonitor):
 
 		if r.orderbook:
 			self.instrument_list_by_figi[figi].update_bid_ask(r.orderbook)
+			self.refresh()
 
 		elif r.last_price:
-			print(f"{ticker_figi.ticker(figi)}: last price = {quotation_to_decimal(r.last_price.price)}")
+			log(f"{ticker_figi.ticker(figi)}: last price = {quotation_to_decimal(r.last_price.price)}")
+			self.refresh()
 
 		elif r.candle:
-			print(f"{ticker_figi.ticker(figi)} has finished candle ({r.candle.interval.name})")
-			# just append?
+			log(f"{ticker_figi.ticker(figi)} has finished candle ({r.candle.interval.name})")
 			await self.instrument_list_by_figi[figi].update_candles()
 			await self.instrument_list_by_figi[figi].move_orders()
+			self.refresh()
+
+
+	# ------------------------------------------------ dashboard
+
+	def start_dashboard(self):
+		self.loop = asyncio.get_running_loop()
+		self.live = Live(self._render_dashboard(), console=self.console, refresh_per_second=5)
+		self.live.start()
+		self.refresh()
+
+
+	def refresh(self):
+		if self.live:
+			self.live.update(self._render_dashboard())
+
+
+	def _render_dashboard(self):
+		views = []
+		for figi, inst in self.instrument_list_by_figi.items():
+			views.append(SimpleNamespace(
+				ticker=ticker_figi.ticker(figi) or figi,
+				period=inst.period,
+				ma=inst.ma,
+				sell_limit=inst.sell_limit,
+				buy_limit=inst.buy_limit,
+				bid=quotation_to_decimal(inst.bid) if inst.bid else None,
+				ask=quotation_to_decimal(inst.ask) if inst.ask else None,
+			))
+		return build_dashboard(views, self.balance, self.positions,
+							   status=self.status, prompt=self.reader.buffer if self.reader else "")
+
+
+	async def refresh_portfolio(self):
+		try:
+			self.balance = await self.account_manager.get_balance()
+			positions = await self.account_manager.get_portfolio_positions()
+			self.positions = [self._position_view(p) for p in positions
+							  if p.instrument_type != "currency"]
+		except Exception as e:
+			log(f"Portfolio refresh failed: {e}")
+		self.refresh()
+
+
+	def _position_view(self, p):
+		return {
+			"ticker": p.ticker,
+			"lots": quotation_to_decimal(p.quantity_lots),
+			"avg": money_to_decimal(p.average_position_price_fifo),
+			"current": money_to_decimal(p.current_price),
+			"profit": money_to_decimal(p.expected_yield_fifo),
+		}
+
+
+	async def _portfolio_loop(self):
+		while not self.stop:
+			await self.refresh_portfolio()
+			await asyncio.sleep(self.portfolio_refresh_seconds)
+
+
+	async def _init_single(self, instrument):
+		figi = instrument.figi
+		await instrument.update_candles()
+		if instrument.type == "etf":
+			broker_instrument = (await self.client.instruments.etf_by(id=figi, id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI)).instrument
+		elif instrument.type == "share":
+			broker_instrument = (await self.client.instruments.share_by(id=figi, id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI)).instrument
+		else:
+			broker_instrument = None
+
+		if broker_instrument:
+			instrument.min_price_increment = broker_instrument.min_price_increment
+
+		if getattr(instrument, "load_regime", False):
+			try:
+				profile = await load_regime_profile(self.client, figi, ticker_figi.ticker(figi))
+			except Exception as e:
+				log(f"Regime load failed for {ticker_figi.ticker(figi)}: {e}")
+				profile = None
+			instrument.update_regime(profile)
 
 
 	async def init_instruments(self):
 		# await self.check_trading_statuses()
 		for figi, i in self.instrument_list_by_figi.items():
-			await i.update_candles()
-			if i.type == "etf":
-				broker_instrument = (await self.client.instruments.etf_by(id=figi, id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI)).instrument
-			elif i.type == "share":
-				broker_instrument = (await self.client.instruments.share_by(id=figi, id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI)).instrument
-
-			i.min_price_increment = broker_instrument.min_price_increment
-			print(f"{ticker_figi.ticker(figi)} min price increment = {i.min_price_increment}")
-
-			if getattr(i, "load_regime", False):
-				try:
-					profile = await load_regime_profile(self.client, figi, ticker_figi.ticker(figi))
-				except Exception as e:
-					print(f"[yellow]Regime load failed for {ticker_figi.ticker(figi)}: {e}[/]")
-					profile = None
-				i.update_regime(profile)
+			await self._init_single(i)
 
 		# get hi/lo orders
 		orders = await self.order_manager.list_orders()
 		for order in orders:
 			if (order.order_type == OrderType.ORDER_TYPE_LIMIT and order.execution_report_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_NEW):
 				if not (order.figi in self.instrument_list_by_figi):
-					print(f"[red bold]UNTRACKED[/] order for [bold]{ticker_figi.ticker(order.figi)}[/] {order.direction.name} at {order.initial_security_price} x {order.lots_requested}")
+					log(f"[red bold]UNTRACKED[/] order for [bold]{ticker_figi.ticker(order.figi)}[/] {order.direction.name} at {order.initial_security_price} x {order.lots_requested}")
 					continue
 
+				instrument = self.instrument_list_by_figi[order.figi]
 				if order.direction == OrderDirection.ORDER_DIRECTION_BUY:
-					if not self.instrument_list_by_figi[order.figi].lo_order:
-						if self.allow_buying:
-							self.instrument_list_by_figi[order.figi].lo_order = order.order_id
-							print(f"[green bold]FOUND[/] lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+					if not instrument.lo_order:
+						if instrument.allow_buying:
+							instrument.lo_order = order.order_id
+							instrument.buy_limit = money_to_decimal(order.initial_security_price)
+							log(f"[green bold]FOUND[/] lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
 						else:
 							await self.order_manager.cancel_order(order.order_id)
-							print(f"[yellow bold]CANCELLED[/] [bold blue]BUY[/] for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}. Buying not allowed")
+							log(f"[yellow bold]CANCELLED[/] [bold blue]BUY[/] for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}. Buying not allowed")
 					else:
 						# more than one BUY order
 						await self.order_manager.cancel_order(order.order_id)
-						print(f"[yellow bold]CANCELLED[/] dup lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+						log(f"[yellow bold]CANCELLED[/] dup lo_order ([bold blue]BUY[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
 				elif order.direction == OrderDirection.ORDER_DIRECTION_SELL:
-					if not self.instrument_list_by_figi[order.figi].hi_order:
-						if self.allow_selling:
-							self.instrument_list_by_figi[order.figi].hi_order = order.order_id
-							print(f"[green bold]FOUND[/] hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+					if not instrument.hi_order:
+						if instrument.allow_selling:
+							instrument.hi_order = order.order_id
+							instrument.sell_limit = money_to_decimal(order.initial_security_price)
+							log(f"[green bold]FOUND[/] hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
 						else:
 							await self.order_manager.cancel_order(order.order_id)
-							print(f"[yellow bold]CANCELLED[/] [bold red]SELL[/] for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}. Selling not allowed")
+							log(f"[yellow bold]CANCELLED[/] [bold red]SELL[/] for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}. Selling not allowed")
 					else:
 						# more than one SELL order
 						await self.order_manager.cancel_order(order.order_id)
-						print(f"[yellow bold]CANCELLED[/] dup hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
-		print("\n____\n\n")
+						log(f"[yellow bold]CANCELLED[/] dup hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+		self.refresh()
 
 
 	async def _monitor(self):
@@ -456,24 +672,12 @@ class OrderMonitor(StreamMonitor):
 					if (r.orderbook or r.last_price or r.candle):
 						figi = (r.orderbook or r.last_price or r.candle).figi
 					else:
-						print("[red] Unsupported kind of stream data")
+						log("[red] Unsupported kind of stream data")
 						inspect(r)
 						continue
 
 					self.last_market_response = r
-
-					# erase menu line
-					_print("\r" + ("             " * 10), end="\r")
-
 					await self.process_stream_response(r, figi)
-
-					# print menu line
-					print(
-						f"[white on grey11][bold green]{ticker_figi.ticker(figi)}[/]: [bold]b[/] - BUY, [bold]s[/] - SELL; \t" +
-						f"[bold]General[/]: [bold]l[/] - LIST ORDERS, [bold]+[/] - PAY IN, " +
-						f"[bold]a[/] - ACCOUNT BALANCE, [bold]o[/] - OPERATIONS, [bold]p[/] - POSITIONS, " +
-						f"[bold]r[/] - RELOAD REGIME", end='\r'
-					)
 
 		# stream error shouldn't stop monitor
 		# exceptions handled in parent class within while loop with retrying logic
@@ -535,11 +739,31 @@ async def test_order_monitor():
 		# 		lots=4
 		# 	)
 		# )
-		await order_monitor.init_instruments()
-		order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
+		order_monitor.start_dashboard()
+		order_monitor.status = "Initializing instruments..."
+		order_monitor.refresh()
+		order_monitor.portfolio_task = asyncio.create_task(order_monitor._portfolio_loop())
 		order_monitor.input_task = asyncio.create_task(order_monitor.get_user_input())
-		while True:
-			await asyncio.sleep(1)
+
+		async def boot():
+			try:
+				await order_monitor.init_instruments()
+				order_monitor.status = "Starting market stream..."
+				order_monitor.refresh()
+				order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
+			except Exception as e:
+				log(f"boot failed: {e}")
+				order_monitor.status = f"boot failed: {e}"
+
+		asyncio.create_task(boot())
+		try:
+			while True:
+				await asyncio.sleep(1)
+		finally:
+			if order_monitor.live:
+				order_monitor.live.stop()
+			if order_monitor.reader:
+				order_monitor.reader.stop()
 
 
 if __name__ == "__main__":

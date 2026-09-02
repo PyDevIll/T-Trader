@@ -114,24 +114,26 @@ class ticker_figi_cache():
 		cls.save()
 
 
-async def etf_ticker_to_figi(client, ticker):
+async def etf_ticker_to_figi(client, ticker, verbose=True):
 	if figi:=ticker_figi_cache.figi(ticker):
 		return figi
 
 	for etf in (await client.instruments.etfs()).instruments:
 		if etf.ticker == ticker:
-			print(f"For {ticker} figi = {etf.figi}")
+			if verbose:
+				print(f"For {ticker} figi = {etf.figi}")
 			ticker_figi_cache.update(ticker, etf.figi)
 			return etf.figi
 
 
-async def share_ticker_to_figi(client, ticker):
+async def share_ticker_to_figi(client, ticker, verbose=True):
 	if figi:=ticker_figi_cache.figi(ticker):
 		return figi
 
 	for share in (await client.instruments.shares()).instruments:
 		if share.ticker == ticker:
-			print(f"For {ticker} figi = {share.figi}")
+			if verbose:
+				print(f"For {ticker} figi = {share.figi}")
 			ticker_figi_cache.update(ticker, share.figi)
 			return share.figi
 
@@ -212,6 +214,11 @@ class AccountManagerSandbox():
 				("[green]" if green_color else "[red]") + f"{profit:+.2f}[/] )"
 			)
 		return positions
+
+
+	async def get_portfolio_positions(self):
+		portfolio = await self.client.sandbox.get_sandbox_portfolio(account_id=self.account.id)
+		return portfolio.positions
 
 
 

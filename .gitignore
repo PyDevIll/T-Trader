@@ -4,3 +4,4 @@ __pycache__/
 src/t_trader/__pycache__/
 tests/__pycache__/
 regime_cache/
+t_trader.log
