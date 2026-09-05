@@ -82,6 +82,27 @@ def MA(period, candle_history):
 		return value
 
 
+_OPERATION_SIDES = {
+	"OPERATION_TYPE_BUY": "BUY",
+	"OPERATION_TYPE_SELL": "SELL",
+	"OPERATION_TYPE_BROKER_FEE": "FEE",
+	"OPERATION_TYPE_INPUT": "PAYIN",
+	"OPERATION_TYPE_OUTPUT": "PAYOUT",
+}
+
+
+def _operation_view(op):
+	side = _OPERATION_SIDES.get(op.operation_type.name, op.operation_type.name.replace("OPERATION_TYPE_", ""))
+	return {
+		"ticker": ticker_figi.ticker(op.figi) if op.figi else "",
+		"side": side,
+		"raw_type": op.type,
+		"sum": money_to_decimal(op.payment),
+		"price": money_to_decimal(op.price) if op.price.currency else None,
+		"date": op.date.astimezone().strftime("%m-%d %H:%M") if op.date.tzinfo else op.date.strftime("%m-%d %H:%M"),
+	}
+
+
 class InstrumentMonitor:
 	def __init__(self, client, figi, type, candle_interval, period, lots=1, allow_buying=True, allow_selling=True,
 				 load_regime=False, band_atr_mult=Decimal(0)):
@@ -373,6 +394,7 @@ class OrderMonitor(StreamMonitor):
 		self.live = None
 		self.balance = Decimal(0)
 		self.positions = []
+		self.operations = []
 		self.status = ""
 		self.prompt = ""
 		self.reader = None
@@ -560,8 +582,20 @@ class OrderMonitor(StreamMonitor):
 				bid=quotation_to_decimal(inst.bid) if inst.bid else None,
 				ask=quotation_to_decimal(inst.ask) if inst.ask else None,
 			))
-		return build_dashboard(views, self.balance, self.positions,
+		return build_dashboard(views, self.balance, self.positions, self.operations,
 							   status=self.status, prompt=self.reader.buffer if self.reader else "")
+
+
+	async def refresh_operations(self, days=7):
+		try:
+			operations = await self.account_manager.get_account_operations(
+				from_=now() - timedelta(days=days),
+				to=now()
+			)
+			operations = sorted(operations, key=lambda op: op.date, reverse=True)
+			self.operations = [_operation_view(op) for op in operations]
+		except Exception as e:
+			log(f"Operations refresh failed: {e}")
 
 
 	async def refresh_portfolio(self):
@@ -572,34 +606,43 @@ class OrderMonitor(StreamMonitor):
 							  if p.instrument_type != "currency"]
 		except Exception as e:
 			log(f"Portfolio refresh failed: {e}")
-		self.refresh()
 
 
 	def _position_view(self, p):
+		avg = money_to_decimal(p.average_position_price_fifo)
+		current = money_to_decimal(p.current_price)
+		quantity = quotation_to_decimal(p.quantity)
 		return {
 			"ticker": p.ticker,
 			"lots": quotation_to_decimal(p.quantity_lots),
-			"avg": money_to_decimal(p.average_position_price_fifo),
-			"current": money_to_decimal(p.current_price),
-			"profit": money_to_decimal(p.expected_yield_fifo),
+			"avg": avg,
+			"current": current,
+			"profit": (current - avg) * quantity,
 		}
 
 
 	async def _portfolio_loop(self):
 		while not self.stop:
 			await self.refresh_portfolio()
+			await self.refresh_operations()
+			self.refresh()
 			await asyncio.sleep(self.portfolio_refresh_seconds)
 
 
 	async def _init_single(self, instrument):
 		figi = instrument.figi
 		await instrument.update_candles()
-		if instrument.type == "etf":
-			broker_instrument = (await self.client.instruments.etf_by(id=figi, id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI)).instrument
-		elif instrument.type == "share":
-			broker_instrument = (await self.client.instruments.share_by(id=figi, id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI)).instrument
-		else:
-			broker_instrument = None
+		try:
+			if instrument.type == "etf":
+				broker_instrument = (await self.client.instruments.etf_by(id=figi, id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI)).instrument
+			elif instrument.type == "share":
+				broker_instrument = (await self.client.instruments.share_by(id=figi, id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI)).instrument
+			else:
+				broker_instrument = None
+		except Exception as e:
+			log(f"_init_single: cannot set broker_instrument")
+			raise(e)
+
 
 		if broker_instrument:
 			instrument.min_price_increment = broker_instrument.min_price_increment
@@ -673,7 +716,6 @@ class OrderMonitor(StreamMonitor):
 						figi = (r.orderbook or r.last_price or r.candle).figi
 					else:
 						log("[red] Unsupported kind of stream data")
-						inspect(r)
 						continue
 
 					self.last_market_response = r
@@ -717,16 +759,6 @@ async def test_order_monitor():
 				allow_selling=False,
 				load_regime=True,
 				band_atr_mult=Decimal("0.5")
-			)
-		)
-		order_monitor.add_instrument(
-			InstrumentMonitor(
-				client=client,
-				figi=await share_ticker_to_figi(client, "MRKS"),
-				type="share",
-				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-				period=6,
-				lots=1
 			)
 		)
 		# order_monitor.add_instrument(

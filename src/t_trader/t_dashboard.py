@@ -24,7 +24,7 @@ def _fmt(d):
 	return f"{d:,.2f}".replace(",", " ")
 
 
-def build_cell(ticker, period, ma, sell_limit, buy_limit, bid, ask, border_style="grey35"):
+def build_cell(ticker, period, ma, sell_limit, buy_limit, bid, ask, border_style="grey53"):
 	t = Text()
 	t.append("sell limit: ", style="dim")
 	t.append(_fmt(sell_limit), style="green" if sell_limit is not None else "dim")
@@ -73,6 +73,40 @@ def build_grid(instruments):
 	return grid
 
 
+def _fmt_signed(d):
+	if d is None:
+		return "—"
+	return f"{d:+,.2f}".replace(",", " ")
+
+
+MAX_OPS_ROWS = 6
+
+
+def build_operation_list(operations):
+	table = Table.grid(expand=True, padding=(0, 1))
+	table.add_column("Date", no_wrap=True)
+	table.add_column("Ticker", style="bold", no_wrap=True)
+	table.add_column("Side", no_wrap=True)
+	table.add_column("Price", justify="right", no_wrap=True)
+	table.add_column("Sum", justify="right", no_wrap=True)
+
+	if operations:
+		table.add_row("Date", "Ticker", "Side", "Price", "Sum")
+		for op in operations[:MAX_OPS_ROWS]:
+			side = Text(op["side"], style={
+				"BUY": "green", "SELL": "red", "PAYIN": "cyan", "PAYOUT": "cyan",
+			}.get(op["side"], "dim"))
+			sum_text = Text(_fmt_signed(op["sum"]), style=("green" if op["sum"] >= 0 else "red"))
+			table.add_row(
+				op["date"], op["ticker"] or "—", side, _fmt(op["price"]), sum_text,
+			)
+	else:
+		table.add_row(Text("No recent operations", style="dim"), "", "", "", "")
+
+	rows = min(len(operations), MAX_OPS_ROWS)
+	height = rows + 3 if operations else 3
+	return Panel(table, title="Operations", border_style="grey53", height=height)
+
 def build_portfolio(balance, positions):
 	"""balance: Decimal; positions: list of dicts with ticker/lots/avg/current/profit."""
 	table = Table.grid(expand=True, padding=(0, 1))
@@ -110,18 +144,22 @@ def build_header(n_instruments):
 DEFAULT_HINT = "Commands: add TICKER | b TICKER | s TICKER | r TICKER | + AMOUNT | q | h"
 
 
-def build_dashboard(instruments, balance, positions, status=None, prompt=""):
+def build_dashboard(instruments, balance, positions, operations, status=None, prompt=""):
 	row_count = max(1, (len(instruments) + 2) // 3)
+	ops_rows = min(len(operations), MAX_OPS_ROWS)
+	ops_height = (ops_rows + 3) if operations else 3
 	root = Layout()
 	root.split_column(
 		Layout(name="header", size=1),
 		Layout(name="grid", size=row_count * CELL_HEIGHT),
+		Layout(name="op_list", size=ops_height),
 		Layout(name="portfolio", size=7),
 		Layout(name="status", size=1),
 		Layout(name="command", size=1),
 	)
 	root["header"].update(build_header(len(instruments)))
 	root["grid"].update(build_grid(instruments))
+	root["op_list"].update(build_operation_list(operations))
 	root["portfolio"].update(build_portfolio(balance, positions))
 	root["status"].update(build_status(status))
 	root["command"].update(build_command_bar(prompt))
@@ -172,17 +210,22 @@ if __name__ == "__main__":
 		{"ticker": "SAFE", "lots": 10, "avg": Decimal("17.80"), "current": Decimal("18.04"), "profit": Decimal("0.24")},
 		{"ticker": "TMON@", "lots": 2, "avg": Decimal("161.20"), "current": Decimal("161.44"), "profit": Decimal("-0.15")},
 	]
+	mock_operations = [
+		{"date": "09-01 22:00", "ticker": "MRKS", "side": "SELL", "price": Decimal("0.40"), "sum": Decimal("396.00")},
+		{"date": "09-01 21:31", "ticker": "MRKS", "side": "BUY", "price": Decimal("0.39"), "sum": Decimal("-389.00")},
+		{"date": "09-01 21:00", "ticker": "", "side": "PAYIN", "price": None, "sum": Decimal("50.00")},
+	]
 
 	# one-shot render for a plain-text preview
 	preview_console = Console(no_color=True, width=100)
 	preview_console.print(build_dashboard(mock_instruments, Decimal("45830.12"), mock_positions,
-										  status="", prompt=""))
+										  mock_operations, status="", prompt=""))
 
 	# interactive live preview that jitters the numbers
 	console = Console()
 	try:
 		with Live(build_dashboard(mock_instruments, Decimal("45830.12"), mock_positions,
-								  status="", prompt=""),
+								  mock_operations, status="", prompt=""),
 				  console=console, refresh_per_second=2, screen=True) as live:
 			tick = 0
 			while True:
@@ -194,6 +237,6 @@ if __name__ == "__main__":
 						inst.bid = inst.bid + drift
 						inst.ask = inst.ask + drift
 				live.update(build_dashboard(mock_instruments, Decimal("45830.12"), mock_positions,
-											status=f"tick {tick}", prompt=""))
+											mock_operations, status=f"tick {tick}", prompt=""))
 	except KeyboardInterrupt:
 		pass

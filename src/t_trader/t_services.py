@@ -204,6 +204,11 @@ class AccountManagerSandbox():
 		return operations
 
 
+	async def get_account_operations(self, from_=None, to=None):
+		operations = (await self.client.sandbox.get_sandbox_operations(account_id=self.account.id, from_=from_, to=to)).operations
+		return operations
+
+
 	async def get_positions(self):
 		positions = (await self.client.sandbox.get_sandbox_portfolio(account_id=self.account.id)).positions
 		for p in positions:
@@ -249,7 +254,7 @@ class OrderManagerSandbox:
 			print(f"Cannot post order: {e.metadata.message}")
 			return None
 
-		inspect(post_order_response)
+		# inspect(post_order_response)
 		if post_order_response.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
 			print(f"Success! ({post_order_response.execution_report_status.name})")
 			return post_order_response.order_id
@@ -319,7 +324,7 @@ class OrderManagerSandbox:
 			order_id=order_id,
 			order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE
 		)
-		inspect(cancel_response.response_metadata)
+		# inspect(cancel_response.response_metadata)
 
 
 	async def get_tradables_from(self, figi_list):
