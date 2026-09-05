@@ -36,7 +36,12 @@ from t_tech.invest.schemas import (
 	TimeInForceType,
 	OrderExecutionReportStatus,
 	OrderIdType,
-	ReplaceOrderRequest
+	ReplaceOrderRequest,
+	StopOrderType,
+	StopOrderDirection,
+	StopOrderExpirationType,
+	StopOrderStatusOption,
+	ExchangeOrderType
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
@@ -325,6 +330,39 @@ class OrderManagerSandbox:
 			order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE
 		)
 		# inspect(cancel_response.response_metadata)
+
+
+	async def get_active_stop_orders(self):
+		"""Silently returns active (resting) stop orders."""
+		response = await self.client.stop_orders.get_stop_orders(account_id=self.account_id)
+		return [so for so in response.stop_orders
+				if so.status == StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE]
+
+
+	async def post_stop_order(self, figi, stop_price_decimal, direction, lots):
+		"""Places a stop-loss (market upon trigger) stop order. Returns stop_order_id or None."""
+		try:
+			response = await self.client.stop_orders.post_stop_order(
+				figi=figi,
+				quantity=lots,
+				stop_price=decimal_to_quotation(stop_price_decimal),
+				direction=direction,
+				account_id=self.account_id,
+				expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+				stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+				exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_MARKET,
+				order_id=str(uuid.uuid4()),
+			)
+		except AioRequestError:
+			return None
+		return response.stop_order_id
+
+
+	async def cancel_stop_order(self, stop_order_id):
+		await self.client.stop_orders.cancel_stop_order(
+			account_id=self.account_id,
+			stop_order_id=stop_order_id,
+		)
 
 
 	async def get_tradables_from(self, figi_list):

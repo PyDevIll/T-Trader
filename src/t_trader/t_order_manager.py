@@ -44,7 +44,9 @@ from t_tech.invest.schemas import (
 	TimeInForceType,
 	OrderExecutionReportStatus,
 	OrderIdType,
-	ReplaceOrderRequest
+	ReplaceOrderRequest,
+	StopOrderDirection,
+	StopOrderType
 )
 from t_tech.invest.exceptions import AioRequestError
 _print = print
@@ -384,7 +386,7 @@ class LineReader(threading.Thread):
 
 
 class OrderMonitor(StreamMonitor):
-	def __init__(self, client, order_manager, portfolio_refresh_seconds=10):
+	def __init__(self, client, order_manager, portfolio_refresh_seconds=10, stop_reconcile_seconds=300):
 		super().__init__(client)
 		self.instrument_list_by_figi = {}	# {figi: InstrumentMonitor}
 		self.order_manager = order_manager
@@ -395,10 +397,13 @@ class OrderMonitor(StreamMonitor):
 		self.balance = Decimal(0)
 		self.positions = []
 		self.operations = []
+		self.stop_by_ticker = {}
 		self.status = ""
 		self.prompt = ""
 		self.reader = None
 		self.portfolio_refresh_seconds = portfolio_refresh_seconds
+		self.stop_reconcile_seconds = stop_reconcile_seconds
+		self.stop_task = None
 		self.loop = None
 		...
 
@@ -604,6 +609,8 @@ class OrderMonitor(StreamMonitor):
 			positions = await self.account_manager.get_portfolio_positions()
 			self.positions = [self._position_view(p) for p in positions
 							  if p.instrument_type != "currency"]
+			for view in self.positions:
+				view["stop"] = self.stop_by_ticker.get(view["ticker"])
 		except Exception as e:
 			log(f"Portfolio refresh failed: {e}")
 
@@ -627,6 +634,141 @@ class OrderMonitor(StreamMonitor):
 			await self.refresh_operations()
 			self.refresh()
 			await asyncio.sleep(self.portfolio_refresh_seconds)
+
+
+	# ------------------------------------------------ protective stops
+
+	async def reconcile_stops(self):
+		"""Keep one protective stop per open position at the current MA(6).
+
+		Every cycle we fetch open positions and active stop orders, then for
+		each instrument either confirm the resting stop matches the position
+		(direction + lots + level ~ MA) or replace it. Stops that no longer
+		correspond to an open position are cancelled.
+		"""
+		try:
+			positions = await self.account_manager.get_portfolio_positions()
+			active_stops = await self.order_manager.get_active_stop_orders()
+		except Exception as e:
+			log(f"Stop reconcile: cannot fetch state: {e}")
+			return
+
+		positions_by_figi = {p.figi: p for p in positions
+							 if p.instrument_type != "currency"}
+		stops_by_figi = {}
+		for so in active_stops:
+			stops_by_figi.setdefault(so.figi, []).append(so)
+
+		figis = set(self.instrument_list_by_figi) | set(stops_by_figi)
+		self.stop_by_ticker = {}
+		for figi in figis:
+			try:
+				await self._reconcile_one_stop(
+					figi,
+					self.instrument_list_by_figi.get(figi),
+					positions_by_figi.get(figi),
+					stops_by_figi.get(figi, []),
+				)
+			except Exception as e:
+				log(f"Stop reconcile failed for {figi}: {e}")
+
+
+	async def _reconcile_one_stop(self, figi, inst, pos, stops):
+		ticker = pos.ticker if pos and pos.ticker else (ticker_figi.ticker(figi) or figi)
+		quantity = quotation_to_decimal(pos.quantity) if pos else Decimal(0)
+		position_lots = quotation_to_decimal(pos.quantity_lots) if pos else Decimal(0)
+
+		def _cancel(so, reason):
+			log(f"Stop reconcile: {reason} {ticker} {so.direction.name} "
+				f"x{so.lots_requested} at {money_to_decimal(so.stop_price)}")
+
+		if quantity == 0:
+			# no open position -> a resting protective stop must not linger
+			for so in stops:
+				await self.order_manager.cancel_stop_order(so.stop_order_id)
+				_cancel(so, "cancelled orphan stop (no position)")
+			return
+
+		if inst is None or inst.ma is None:
+			# we can only manage stops for instruments we track the MA of
+			log(f"Stop reconcile: no tracked MA for {ticker}, stop left as-is")
+			return
+
+		lot_count = abs(position_lots)
+		if lot_count == 0 or lot_count != lot_count.to_integral_value():
+			log(f"Stop reconcile: cannot derive whole lot count for {ticker} "
+				f"(quantity={quantity}, lots={position_lots})")
+			return
+
+		lots = int(lot_count)
+		direction = (StopOrderDirection.STOP_ORDER_DIRECTION_SELL if position_lots > 0
+					 else StopOrderDirection.STOP_ORDER_DIRECTION_BUY)
+
+		ma = inst.ma
+		bid = quotation_to_decimal(inst.bid) if inst.bid else None
+		ask = quotation_to_decimal(inst.ask) if inst.ask else None
+		close = quotation_to_decimal(inst.candle_history[-1].close) if inst.candle_history else None
+		if ask is None and bid is None and close is None:
+			log(f"Stop reconcile: no market price for {ticker}")
+			return
+
+		# the broker rejects protective stops on the wrong side of the market.
+		# a SELL stop must sit below the best bid, a BUY stop above the best ask.
+		if direction == StopOrderDirection.STOP_ORDER_DIRECTION_SELL:
+			market = bid if bid is not None else (ask if ask is not None else close)
+			if ma >= market:
+				log(f"Stop reconcile: skip SELL stop for {ticker}: MA {ma} >= bid/ref {market}")
+				return
+		else:
+			market = ask if ask is not None else (bid if bid is not None else close)
+			if ma <= market:
+				log(f"Stop reconcile: skip BUY stop for {ticker}: MA {ma} <= ask/ref {market}")
+				return
+
+		min_step = quotation_to_decimal(inst.min_price_increment) if inst.min_price_increment else Decimal("0.01")
+		tolerance = min_step * 3
+		grid = ma // min_step * min_step
+		if direction != StopOrderDirection.STOP_ORDER_DIRECTION_SELL and grid != ma:
+			# round buy stops up so they stay safely above the market
+			grid += min_step
+		stop_price = grid
+
+		keep = None
+		for so in stops:
+			if (so.direction == direction and so.lots_requested == lots
+					and so.order_type == StopOrderType.STOP_ORDER_TYPE_STOP_LOSS
+					and abs(money_to_decimal(so.stop_price) - ma) <= tolerance):
+				keep = so
+				break
+
+		if keep is not None:
+			for so in stops:
+				if so is not keep:
+					await self.order_manager.cancel_stop_order(so.stop_order_id)
+					_cancel(so, "cancelled duplicate stop")
+			self.stop_by_ticker[ticker] = money_to_decimal(keep.stop_price)
+			return
+
+		for so in stops:
+			await self.order_manager.cancel_stop_order(so.stop_order_id)
+			_cancel(so, f"cancelled stale stop (want {direction.name} x{lots} at {stop_price})")
+
+		stop_id = await self.order_manager.post_stop_order(
+			figi=figi, stop_price_decimal=stop_price, direction=direction, lots=lots)
+		if stop_id:
+			self.stop_by_ticker[ticker] = stop_price
+			log(f"Stop reconcile: placed {direction.name} stop x{lots} at {stop_price} for {ticker}")
+		else:
+			log(f"Stop reconcile: FAILED to place {direction.name} stop x{lots} at {stop_price} for {ticker}")
+
+
+	async def _stop_loop(self):
+		while not self.stop:
+			try:
+				await self.reconcile_stops()
+			except Exception as e:
+				log(f"Stop loop error: {e}")
+			await asyncio.sleep(self.stop_reconcile_seconds)
 
 
 	async def _init_single(self, instrument):
@@ -783,6 +925,7 @@ async def test_order_monitor():
 				order_monitor.status = "Starting market stream..."
 				order_monitor.refresh()
 				order_monitor.running_task = asyncio.create_task(order_monitor.monitor())
+				order_monitor.stop_task = asyncio.create_task(order_monitor._stop_loop())
 			except Exception as e:
 				log(f"boot failed: {e}")
 				order_monitor.status = f"boot failed: {e}"

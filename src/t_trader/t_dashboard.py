@@ -108,20 +108,22 @@ def build_operation_list(operations):
 	return Panel(table, title="Operations", border_style="grey53", height=height)
 
 def build_portfolio(balance, positions):
-	"""balance: Decimal; positions: list of dicts with ticker/lots/avg/current/profit."""
+	"""balance: Decimal; positions: list of dicts with ticker/lots/avg/current/profit/stop."""
 	table = Table.grid(expand=True, padding=(0, 1))
 	table.add_column("Ticker", style="bold", no_wrap=True)
 	table.add_column("Lots", justify="right", no_wrap=True)
 	table.add_column("Avg", justify="right", no_wrap=True)
 	table.add_column("Now", justify="right", no_wrap=True)
+	table.add_column("Stop", justify="right", no_wrap=True)
 	table.add_column("P/L", justify="right", no_wrap=True)
 
 	if positions:
-		table.add_row("Ticker", "Lots", "Avg", "Now", "P/L")
+		table.add_row("Ticker", "Lots", "Avg", "Now", "Stop", "P/L")
 		for p in positions:
 			profit_text = Text(f"{p['profit']:+.2f}", style=("green" if p["profit"] >= 0 else "red"))
+			stop_text = Text(_fmt(p["stop"]) if p.get("stop") is not None else "—", style="yellow")
 			table.add_row(
-				p["ticker"], _fmt(p["lots"]), _fmt(p["avg"]), _fmt(p["current"]), profit_text,
+				p["ticker"], _fmt(p["lots"]), _fmt(p["avg"]), _fmt(p["current"]), stop_text, profit_text,
 			)
 	else:
 		table.add_row(Text("No open positions", style="dim"), "", "", "", "")
@@ -207,8 +209,8 @@ if __name__ == "__main__":
 		_MockInstrument("TGLD@", Decimal("412.30"), Decimal("414.40"), Decimal("410.20"), Decimal("412.28"), Decimal("412.35")),
 	]
 	mock_positions = [
-		{"ticker": "SAFE", "lots": 10, "avg": Decimal("17.80"), "current": Decimal("18.04"), "profit": Decimal("0.24")},
-		{"ticker": "TMON@", "lots": 2, "avg": Decimal("161.20"), "current": Decimal("161.44"), "profit": Decimal("-0.15")},
+		{"ticker": "SAFE", "lots": 10, "avg": Decimal("17.80"), "current": Decimal("18.04"), "profit": Decimal("0.24"), "stop": Decimal("17.92")},
+		{"ticker": "TMON@", "lots": 2, "avg": Decimal("161.20"), "current": Decimal("161.44"), "profit": Decimal("-0.15"), "stop": None},
 	]
 	mock_operations = [
 		{"date": "09-01 22:00", "ticker": "MRKS", "side": "SELL", "price": Decimal("0.40"), "sum": Decimal("396.00")},
