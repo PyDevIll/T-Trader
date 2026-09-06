@@ -517,7 +517,7 @@ async def llm_regime_brief(digest_card, ticker):
 		"DIGEST:\n" + digest_card
 	)
 	try:
-		resp = await client.chat.completions.create(
+		resp = await asyncio.wait_for(client.chat.completions.create(
 			model=model,
 			messages=[
 				{"role": "system", "content": LLM_SYSTEM},
@@ -525,7 +525,7 @@ async def llm_regime_brief(digest_card, ticker):
 			],
 			response_format={"type": "json_object"},
 			temperature=0.2,
-		)
+		), timeout=60)
 		content = resp.choices[0].message.content
 		data = json.loads(content)
 		console.print(Panel(
@@ -533,11 +533,10 @@ async def llm_regime_brief(digest_card, ticker):
 			title=f"LLM regime brief: {ticker} ({model})",
 			style="magenta",
 		))
-		return data
-	except Exception as e:
-		console.print(f"[red]LLM brief failed for {ticker}: {e}[/]")
+	except asyncio.TimeoutError:
+		console.print("[red]LLM timeout[/]")
 		return None
-
+	return data
 
 # ---------------------------------------------------------------------------
 # main
@@ -588,6 +587,7 @@ async def main(tickers, years, k, max_hold, trend_window, do_llm, csv_dir):
 
 			if do_llm:
 				await llm_regime_brief(regime_card(digest), ticker)
+				await asyncio.sleep(2)
 
 	console.print(f"trade ledger: [bold]{trade_path}[/]  stats ledger: [bold]{stats_path}[/]")
 	console.print("NOTE: pattern test is in-sample with trailing features only — a sanity "

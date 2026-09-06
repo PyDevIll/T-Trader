@@ -938,7 +938,6 @@ class OrderMonitor(StreamMonitor):
 		self.stream.last_price.subscribe(trade_instruments)
 		self.stream.candles.waiting_close(enabled=True).subscribe(candle_instruments)	# cannot specify candle_source_type=CandleSource.CANDLE_SOURCE_INCLUDE_WEEKEND
 		try:
-			self.status = "Market stream started"
 			# first response returns value "SubscribeTradesResponse(..)"
 			async for r in self.stream:
 				if not self.stop:

@@ -1,1 +1,1 @@
-{"ticker_to_figi": {"TMON@": "TCS70A106DL2", "SAFE": "TCSM170035N9", "MRKS": "BBG000VJMH65"}, "figi_to_ticker": {"TCS70A106DL2": "TMON@", "TCSM170035N9": "SAFE", "BBG000VJMH65": "MRKS"}}
+{"ticker_to_figi": {"TMON@": "TCS70A106DL2", "SAFE": "TCSM170035N9", "MRKS": "BBG000VJMH65", "TGLD@": "TCS80A101X50", "MTSS": "BBG004S681W1"}, "figi_to_ticker": {"TCS70A106DL2": "TMON@", "TCSM170035N9": "SAFE", "BBG000VJMH65": "MRKS", "TCS80A101X50": "TGLD@", "BBG004S681W1": "MTSS"}, "types": {"TMON@": "etf", "SAFE": "etf", "TGLD@": "etf", "MTSS": "share"}}
