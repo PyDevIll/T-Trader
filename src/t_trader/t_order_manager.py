@@ -564,6 +564,12 @@ class OrderMonitor(StreamMonitor):
 		self.status = f"Added {ticker}"
 		if self.stream:
 			self.stream.stop()
+		# the new instrument may already have an open position: set up its
+		# MA exits / hard stop right away instead of waiting for the loop
+		try:
+			await self.reconcile_stops()
+		except Exception as e:
+			log(f"reconcile after add failed for {ticker}: {e}")
 
 
 	async def process_stream_response(self, market_response, figi):
@@ -932,6 +938,7 @@ class OrderMonitor(StreamMonitor):
 		self.stream.last_price.subscribe(trade_instruments)
 		self.stream.candles.waiting_close(enabled=True).subscribe(candle_instruments)	# cannot specify candle_source_type=CandleSource.CANDLE_SOURCE_INCLUDE_WEEKEND
 		try:
+			self.status = "Market stream started"
 			# first response returns value "SubscribeTradesResponse(..)"
 			async for r in self.stream:
 				if not self.stop:

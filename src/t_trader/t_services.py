@@ -83,6 +83,7 @@ def instruments_by_filter(instruments, filter_dict):
 class ticker_figi_cache():
 	_ticker_to_figi = {}
 	_figi_to_ticker = {}
+	_type_by_ticker = {}
 
 	@classmethod
 	def init(cls):
@@ -94,6 +95,7 @@ class ticker_figi_cache():
 		else:
 			cls._ticker_to_figi = cache["ticker_to_figi"]
 			cls._figi_to_ticker = cache["figi_to_ticker"]
+			cls._type_by_ticker = cache.get("types", {})
 
 	@classmethod
 	def save(cls):
@@ -101,7 +103,8 @@ class ticker_figi_cache():
 		with open('ticker_figi_cache.txt', 'w') as f:
 			json.dump({
 				'ticker_to_figi': cls._ticker_to_figi,
-				'figi_to_ticker': cls._figi_to_ticker
+				'figi_to_ticker': cls._figi_to_ticker,
+				'types': cls._type_by_ticker
 			}, f)
 
 	@classmethod
@@ -113,33 +116,48 @@ class ticker_figi_cache():
 		return cls._figi_to_ticker[figi] if figi in cls._figi_to_ticker else None
 
 	@classmethod
-	def update(cls, ticker, figi):
+	def type(cls, ticker):
+		# cached asset class ("etf"/"share"); None for legacy cache entries
+		return cls._type_by_ticker.get(ticker)
+
+	@classmethod
+	def update(cls, ticker, figi, type_):
 		cls._ticker_to_figi[ticker] = figi
 		cls._figi_to_ticker[figi] = ticker
+		cls._type_by_ticker[ticker] = type_
 		cls.save()
 
 
 async def etf_ticker_to_figi(client, ticker, verbose=True):
-	if figi:=ticker_figi_cache.figi(ticker):
-		return figi
-
+	cached = ticker_figi_cache.figi(ticker)
+	cached_type = ticker_figi_cache.type(ticker)
+	if cached and cached_type == "etf":
+		return cached
+	if cached and cached_type is not None:
+		# cached under the other asset class: this is not an ETF
+		return None
+	# legacy/uncached entry: scan to confirm the real asset class
 	for etf in (await client.instruments.etfs()).instruments:
 		if etf.ticker == ticker:
 			if verbose:
 				print(f"For {ticker} figi = {etf.figi}")
-			ticker_figi_cache.update(ticker, etf.figi)
+			ticker_figi_cache.update(ticker, etf.figi, "etf")
 			return etf.figi
 
 
 async def share_ticker_to_figi(client, ticker, verbose=True):
-	if figi:=ticker_figi_cache.figi(ticker):
-		return figi
-
+	cached = ticker_figi_cache.figi(ticker)
+	cached_type = ticker_figi_cache.type(ticker)
+	if cached and cached_type == "share":
+		return cached
+	if cached and cached_type is not None:
+		# cached under the other asset class: this is not a share
+		return None
 	for share in (await client.instruments.shares()).instruments:
 		if share.ticker == ticker:
 			if verbose:
 				print(f"For {ticker} figi = {share.figi}")
-			ticker_figi_cache.update(ticker, share.figi)
+			ticker_figi_cache.update(ticker, share.figi, "share")
 			return share.figi
 
 
