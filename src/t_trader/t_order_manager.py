@@ -107,7 +107,7 @@ def _operation_view(op):
 
 class InstrumentMonitor:
 	def __init__(self, client, figi, type, candle_interval, period, lots=1, allow_buying=True, allow_selling=True,
-				 load_regime=False, band_atr_mult=Decimal(0)):
+				 load_regime=False, band_atr_mult=Decimal(0), hard_stop_dev_k=2):
 		self.client = client
 		self.figi = figi
 		self.type = type
@@ -137,6 +137,9 @@ class InstrumentMonitor:
 		self.trend_ok = True
 		self.ref_high = None
 		self.worst_dd = Decimal(0)
+		#	 position-aware stops (set by OrderMonitor.reconcile_stops)
+		self.hard_stop_dev_k = hard_stop_dev_k
+		self.hold_side = None	# "long", "short" or None (flat)
 
 
 	async def update_candles(self):
@@ -262,33 +265,53 @@ class InstrumentMonitor:
 
 
 	# moved to InstrumentMonitor
-	async def move_orders(self):
-		# if not self.is_trading:
-		# 	return
-
-		self.check_regime_break()
-
+	def band_deviation(self):
+		"""Deviation band width as a fraction of MA (base 0.15%, ATR-scaled when enabled)."""
 		deviation = self.deviation_percent
 		if self.band_atr_mult:
 			atr = self.ATR()
 			if atr and self.ma:
 				deviation = max(deviation, self.band_atr_mult * atr / self.ma)
+		return deviation
 
-		if self.allow_selling:
+
+	# moved to InstrumentMonitor
+	async def move_orders(self):
+		# if not self.is_trading:
+		# 	return
+
+		self.check_regime_break()
+		deviation = self.band_deviation()
+
+		if self.allow_selling and self.hold_side != "long":
 			sell_quotation = self.quantize(self.ma + self.ma * deviation)
 			self.hi_order = await self._move_order(self.hi_order, sell_quotation, "SELL")
 			self.sell_limit = quotation_to_decimal(sell_quotation) if self.hi_order else None
+		elif self.hold_side == "long" and self.hi_order:
+			# opposite bracket would double-sell the position: keep it cancelled
+			log(f"[yellow]CANCELLED[/] SELL bracket for {ticker_figi.ticker(self.figi)} "
+				  f"(holding long, managed by MA stops)")
+			await self.order_manager.cancel_order(self.hi_order)
+			self.hi_order = None
+			self.sell_limit = None
 
-		if self.allow_buying and self.trend_ok and not self.regime_break:
+		if self.allow_buying and self.trend_ok and not self.regime_break and self.hold_side != "short":
 			buy_quotation = self.quantize(self.ma - self.ma * deviation)
 			self.lo_order = await self._move_order(self.lo_order, buy_quotation, "BUY")
 			self.buy_limit = quotation_to_decimal(buy_quotation) if self.lo_order else None
-		elif self.lo_order:
+		elif self.hold_side == "short" and self.lo_order:
 			log(f"[yellow]CANCELLED[/] BUY bracket for {ticker_figi.ticker(self.figi)} "
-				  f"(trend_ok={self.trend_ok}, regime_break={self.regime_break})")
+				  f"(holding short, managed by MA stops)")
 			await self.order_manager.cancel_order(self.lo_order)
 			self.lo_order = None
 			self.buy_limit = None
+		elif not (self.allow_buying and self.trend_ok and not self.regime_break):
+			if self.lo_order:
+				log(f"[yellow]CANCELLED[/] BUY bracket for {ticker_figi.ticker(self.figi)} "
+					  f"(trend_ok={self.trend_ok}, regime_break={self.regime_break})")
+				await self.order_manager.cancel_order(self.lo_order)
+				self.lo_order = None
+				self.buy_limit = None
 
 
 	# moved to InstrumentMonitor
@@ -636,15 +659,21 @@ class OrderMonitor(StreamMonitor):
 			await asyncio.sleep(self.portfolio_refresh_seconds)
 
 
-	# ------------------------------------------------ protective stops
+	# ------------------------------------------------ position exits
 
 	async def reconcile_stops(self):
-		"""Keep one protective stop per open position at the current MA(6).
+		"""Manage MA(6) exits and hard stops for open positions.
 
-		Every cycle we fetch open positions and active stop orders, then for
-		each instrument either confirm the resting stop matches the position
-		(direction + lots + level ~ MA) or replace it. Stops that no longer
-		correspond to an open position are cancelled.
+		Every cycle we fetch open positions and active stop orders, then keep
+		the position protected around the current MA(6):
+		- while the market is on the reversion side of the MA the MA level is
+		  the take-profit target;
+		- once the position is in profit beyond the MA the MA level becomes a
+		  trailing stop-loss;
+		- a hard stop-loss rests a few deviations beyond the average entry
+		  price in the reversion zone.
+		Stops that no longer correspond to an open position are cancelled and
+		the opposite bracket is suppressed while the position is held.
 		"""
 		try:
 			positions = await self.account_manager.get_portfolio_positions()
@@ -680,18 +709,19 @@ class OrderMonitor(StreamMonitor):
 
 		def _cancel(so, reason):
 			log(f"Stop reconcile: {reason} {ticker} {so.direction.name} "
-				f"x{so.lots_requested} at {money_to_decimal(so.stop_price)}")
+				f"{so.order_type.name} x{so.lots_requested} at {money_to_decimal(so.stop_price)}")
 
 		if quantity == 0:
-			# no open position -> a resting protective stop must not linger
+			# flat -> no MA exit / hard stop may linger
+			if inst is not None:
+				inst.hold_side = None
 			for so in stops:
 				await self.order_manager.cancel_stop_order(so.stop_order_id)
 				_cancel(so, "cancelled orphan stop (no position)")
 			return
 
-		if inst is None or inst.ma is None:
-			# we can only manage stops for instruments we track the MA of
-			log(f"Stop reconcile: no tracked MA for {ticker}, stop left as-is")
+		if inst is None:
+			# position on an instrument we do not track the MA of: leave alone
 			return
 
 		lot_count = abs(position_lots)
@@ -701,65 +731,116 @@ class OrderMonitor(StreamMonitor):
 			return
 
 		lots = int(lot_count)
-		direction = (StopOrderDirection.STOP_ORDER_DIRECTION_SELL if position_lots > 0
-					 else StopOrderDirection.STOP_ORDER_DIRECTION_BUY)
+		is_long = quantity > 0
+		inst.hold_side = "long" if is_long else "short"
+
+		# while a position is managed by MA stops, the opposite bracket could
+		# double-close it later (fill the position, then the bracket re-sells):
+		# cancel it here and keep it cancelled via move_orders while held.
+		if is_long and inst.hi_order:
+			await self.order_manager.cancel_order_silent(inst.hi_order)
+			log(f"Stop reconcile: cancelled opposite SELL bracket for {ticker} (holding long)")
+			inst.hi_order = None
+			inst.sell_limit = None
+		elif not is_long and inst.lo_order:
+			await self.order_manager.cancel_order_silent(inst.lo_order)
+			log(f"Stop reconcile: cancelled opposite BUY bracket for {ticker} (holding short)")
+			inst.lo_order = None
+			inst.buy_limit = None
+
+		if inst.ma is None:
+			log(f"Stop reconcile: no tracked MA for {ticker}, stops left as-is")
+			return
 
 		ma = inst.ma
 		bid = quotation_to_decimal(inst.bid) if inst.bid else None
 		ask = quotation_to_decimal(inst.ask) if inst.ask else None
 		close = quotation_to_decimal(inst.candle_history[-1].close) if inst.candle_history else None
-		if ask is None and bid is None and close is None:
+		if bid is None and ask is None and close is None:
 			log(f"Stop reconcile: no market price for {ticker}")
 			return
+		low = bid if bid is not None else (ask if ask is not None else close)
+		high = ask if ask is not None else (bid if bid is not None else close)
+		mid = close if close is not None else (low + high) / 2
 
-		# the broker rejects protective stops on the wrong side of the market.
-		# a SELL stop must sit below the best bid, a BUY stop above the best ask.
-		if direction == StopOrderDirection.STOP_ORDER_DIRECTION_SELL:
-			market = bid if bid is not None else (ask if ask is not None else close)
-			if ma >= market:
-				log(f"Stop reconcile: skip SELL stop for {ticker}: MA {ma} >= bid/ref {market}")
-				return
-		else:
-			market = ask if ask is not None else (bid if bid is not None else close)
-			if ma <= market:
-				log(f"Stop reconcile: skip BUY stop for {ticker}: MA {ma} <= ask/ref {market}")
-				return
-
+		avg = money_to_decimal(pos.average_position_price_fifo) if pos else Decimal(0)
 		min_step = quotation_to_decimal(inst.min_price_increment) if inst.min_price_increment else Decimal("0.01")
 		tolerance = min_step * 3
-		grid = ma // min_step * min_step
-		if direction != StopOrderDirection.STOP_ORDER_DIRECTION_SELL and grid != ma:
-			# round buy stops up so they stay safely above the market
-			grid += min_step
-		stop_price = grid
+		dev = inst.band_deviation()
 
-		keep = None
-		for so in stops:
-			if (so.direction == direction and so.lots_requested == lots
-					and so.order_type == StopOrderType.STOP_ORDER_TYPE_STOP_LOSS
-					and abs(money_to_decimal(so.stop_price) - ma) <= tolerance):
-				keep = so
-				break
+		def _away(level, above_market):
+			# keep the resting order safely on its side of the market
+			g = level // min_step * min_step
+			if above_market and g != level:
+				g += min_step
+			return g
 
-		if keep is not None:
-			for so in stops:
-				if so is not keep:
-					await self.order_manager.cancel_stop_order(so.stop_order_id)
-					_cancel(so, "cancelled duplicate stop")
-			self.stop_by_ticker[ticker] = money_to_decimal(keep.stop_price)
-			return
-
-		for so in stops:
-			await self.order_manager.cancel_stop_order(so.stop_order_id)
-			_cancel(so, f"cancelled stale stop (want {direction.name} x{lots} at {stop_price})")
-
-		stop_id = await self.order_manager.post_stop_order(
-			figi=figi, stop_price_decimal=stop_price, direction=direction, lots=lots)
-		if stop_id:
-			self.stop_by_ticker[ticker] = stop_price
-			log(f"Stop reconcile: placed {direction.name} stop x{lots} at {stop_price} for {ticker}")
+		# desired stops: (label, stop_order_type, direction, level)
+		desired = []
+		if is_long:
+			if ma > mid:
+				# dip zone: price is expected to revert back up to the MA
+				if ma > high:
+					desired.append(("MA exit", StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+									StopOrderDirection.STOP_ORDER_DIRECTION_SELL, _away(ma, True)))
+				if avg > 0:
+					hard = _away(avg - avg * dev * inst.hard_stop_dev_k, False)
+					if hard < low:
+						desired.append(("hard stop", StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+										StopOrderDirection.STOP_ORDER_DIRECTION_SELL, hard))
+			elif ma < low:
+				# in profit above the MA: trail out rather than give it back
+				desired.append(("MA exit", StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+								StopOrderDirection.STOP_ORDER_DIRECTION_SELL, _away(ma, False)))
 		else:
-			log(f"Stop reconcile: FAILED to place {direction.name} stop x{lots} at {stop_price} for {ticker}")
+			if ma < mid:
+				# rip zone: price is expected to revert back down to the MA
+				if ma < low:
+					desired.append(("MA exit", StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+									StopOrderDirection.STOP_ORDER_DIRECTION_BUY, _away(ma, False)))
+				if avg > 0:
+					hard = _away(avg + avg * dev * inst.hard_stop_dev_k, True)
+					if hard > high:
+						desired.append(("hard stop", StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+										StopOrderDirection.STOP_ORDER_DIRECTION_BUY, hard))
+			elif ma > high:
+				# in profit below the MA: trail out rather than give it back
+				desired.append(("MA exit", StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+								StopOrderDirection.STOP_ORDER_DIRECTION_BUY, _away(ma, True)))
+
+		active = [False] * len(desired)
+		rest = list(stops)
+		for i, (_label, otype, direction, level) in enumerate(desired):
+			for j, so in enumerate(rest):
+				if (so.direction == direction and so.order_type == otype
+						and so.lots_requested == lots
+						and abs(money_to_decimal(so.stop_price) - level) <= tolerance):
+					active[i] = True
+					del rest[j]
+					break
+
+		for so in rest:
+			await self.order_manager.cancel_stop_order(so.stop_order_id)
+			_cancel(so, "cancelled stale/duplicate stop")
+
+		display = None
+		for i, (label, otype, direction, level) in enumerate(desired):
+			if active[i]:
+				display = level if label == "MA exit" else (display or level)
+				continue
+			stop_id = await self.order_manager.post_stop_order(
+				figi=figi, stop_price_decimal=level, direction=direction, lots=lots,
+				stop_order_type=otype)
+			if stop_id:
+				active[i] = True
+				display = level if label == "MA exit" else (display or level)
+				log(f"Stop reconcile: placed {label} {direction.name} {otype.name} "
+					f"x{lots} at {level} for {ticker}")
+			else:
+				log(f"Stop reconcile: FAILED to place {label} {direction.name} "
+					f"{otype.name} x{lots} at {level} for {ticker}")
+		if display is not None:
+			self.stop_by_ticker[ticker] = display
 
 
 	async def _stop_loop(self):

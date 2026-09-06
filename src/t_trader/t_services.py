@@ -332,6 +332,14 @@ class OrderManagerSandbox:
 		# inspect(cancel_response.response_metadata)
 
 
+	async def cancel_order_silent(self, order_id):
+		await self.client.sandbox.cancel_sandbox_order(
+			account_id=self.account_id,
+			order_id=order_id,
+			order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE
+		)
+
+
 	async def get_active_stop_orders(self):
 		"""Silently returns active (resting) stop orders."""
 		response = await self.client.stop_orders.get_stop_orders(account_id=self.account_id)
@@ -339,8 +347,9 @@ class OrderManagerSandbox:
 				if so.status == StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE]
 
 
-	async def post_stop_order(self, figi, stop_price_decimal, direction, lots):
-		"""Places a stop-loss (market upon trigger) stop order. Returns stop_order_id or None."""
+	async def post_stop_order(self, figi, stop_price_decimal, direction, lots,
+							  stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS):
+		"""Places a stop order (market upon trigger). Returns stop_order_id or None."""
 		try:
 			response = await self.client.stop_orders.post_stop_order(
 				figi=figi,
@@ -349,7 +358,7 @@ class OrderManagerSandbox:
 				direction=direction,
 				account_id=self.account_id,
 				expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
-				stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+				stop_order_type=stop_order_type,
 				exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_MARKET,
 				order_id=str(uuid.uuid4()),
 			)
