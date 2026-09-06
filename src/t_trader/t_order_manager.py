@@ -465,6 +465,11 @@ class OrderMonitor(StreamMonitor):
 				self.status = "Usage: add TICKER"
 			else:
 				await self.add_ticker(arg)
+		elif cmd == "rm":
+			if not arg:
+				self.status = "Usage: rm TICKER"
+			else:
+				await self.remove_ticker(arg)
 		elif cmd in ("b", "s"):
 			figi, _ = await self._resolve_figi(arg) if arg else (self._last_figi(), None)
 			if not figi:
@@ -513,7 +518,7 @@ class OrderMonitor(StreamMonitor):
 			if self.reader:
 				self.reader.stop()
 		elif cmd in ("h", "help"):
-			self.status = "add TICKER | b TICKER | s TICKER | r TICKER | + AMOUNT | q | h"
+			self.status = "add TICKER | rm TICKER | b TICKER | s TICKER | r TICKER | + AMOUNT | q | h"
 		else:
 			self.status = f"Unknown command: {cmd} (try h)"
 		self.refresh()
@@ -577,7 +582,67 @@ class OrderMonitor(StreamMonitor):
 			log(f"reconcile after add failed for {ticker}: {e}")
 
 
+	async def remove_ticker(self, ticker):
+		"""Stop monitoring TICKER and cancel every order resting for it:
+		the hi/lo brackets plus any MA-exit / hard-stop orders (whether or
+		not a position is open). Leaves any position itself untouched."""
+		ticker = ticker.upper()
+		figi, _ = await self._resolve_figi(ticker)
+		inst = self.instrument_list_by_figi.get(figi) if figi else None
+		if not figi or inst is None:
+			self.status = f"{ticker} is not in the monitor"
+			return
+
+		self.instrument_list_by_figi.pop(figi)
+		cancelled = []
+
+		if inst.hi_order:
+			try:
+				await self.order_manager.cancel_order_silent(inst.hi_order)
+				cancelled.append("sell_limit")
+			except Exception as e:
+				log(f"rm {ticker}: cancel sell_limit failed: {e}")
+			inst.hi_order = None
+			inst.sell_limit = None
+		if inst.lo_order:
+			try:
+				await self.order_manager.cancel_order_silent(inst.lo_order)
+				cancelled.append("buy_limit")
+			except Exception as e:
+				log(f"rm {ticker}: cancel buy_limit failed: {e}")
+			inst.lo_order = None
+			inst.buy_limit = None
+
+		try:
+			active_stops = await self.order_manager.get_active_stop_orders()
+		except Exception as e:
+			log(f"rm {ticker}: cannot list stop orders: {e}")
+			active_stops = []
+		for so in active_stops:
+			if so.figi == figi:
+				try:
+					await self.order_manager.cancel_stop_order(so.stop_order_id)
+					cancelled.append(f"{so.order_type.name.replace('STOP_ORDER_TYPE_', '')}")
+				except Exception as e:
+					log(f"rm {ticker}: cancel stop {so.stop_order_id} failed: {e}")
+
+		self.stop_by_ticker.pop(ticker, None)
+		self.stop_by_ticker.pop(ticker_figi.ticker(figi), None)
+
+		# reconnect the market stream without this instrument
+		if self.stream:
+			self.stream.stop()
+
+		if cancelled:
+			self.status = f"Removed {ticker} (cancelled: {', '.join(dict.fromkeys(cancelled))})"
+		else:
+			self.status = f"Removed {ticker} (no resting orders)"
+
+
 	async def process_stream_response(self, market_response, figi):
+		if figi not in self.instrument_list_by_figi:
+			# instrument was removed while the stream was still subscribed
+			return
 		r = market_response
 
 		if r.orderbook:
