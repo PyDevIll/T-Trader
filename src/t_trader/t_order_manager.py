@@ -561,6 +561,11 @@ class OrderMonitor(StreamMonitor):
 			del self.instrument_list_by_figi[figi]
 			self.status = f"init failed for {ticker}: {e}"
 			return
+		try:
+			# prime hi/lo brackets immediately (candles then keep moving them)
+			await instrument.move_orders()
+		except Exception as e:
+			log(f"Initial move_orders failed for {ticker}: {e}")
 		self.status = f"Added {ticker}"
 		if self.stream:
 			self.stream.stop()
@@ -925,6 +930,14 @@ class OrderMonitor(StreamMonitor):
 						# more than one SELL order
 						await self.order_manager.cancel_order(order.order_id)
 						log(f"[yellow bold]CANCELLED[/] dup hi_order ([bold red]SELL[/]) for [bold]{ticker_figi.ticker(order.figi)}[/] at {order.initial_security_price} x {order.lots_requested}")
+		# prime hi/lo brackets now instead of waiting for the first candle
+		# close (may be minutes away / never on a closed market); candles keep
+		# moving them afterwards
+		for figi, instrument in self.instrument_list_by_figi.items():
+			try:
+				await instrument.move_orders()
+			except Exception as e:
+				log(f"Initial move_orders failed for {ticker_figi.ticker(figi)}: {e}")
 		self.refresh()
 
 
@@ -990,6 +1003,59 @@ async def test_order_monitor():
 				band_atr_mult=Decimal("0.5")
 			)
 		)
+		order_monitor.add_instrument(
+			InstrumentMonitor(
+				client=client,
+				figi=await etf_ticker_to_figi(client, "TMOS@"),
+				type="etf",
+				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
+				period=6,
+				lots=1,
+				allow_selling=True,
+				load_regime=True,
+				band_atr_mult=Decimal("0.5")
+			)
+		)
+		order_monitor.add_instrument(
+			InstrumentMonitor(
+				client=client,
+				figi=await etf_ticker_to_figi(client, "TGLD@"),
+				type="etf",
+				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
+				period=6,
+				lots=1,
+				allow_selling=True,
+				load_regime=True,
+				band_atr_mult=Decimal("0.5")
+			)
+		)
+		order_monitor.add_instrument(
+			InstrumentMonitor(
+				client=client,
+				figi=await share_ticker_to_figi(client, "MTSS"),
+				type="share",
+				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
+				period=6,
+				lots=1,
+				allow_selling=True,
+				load_regime=True,
+				band_atr_mult=Decimal("0.5")
+			)
+		)
+		order_monitor.add_instrument(
+			InstrumentMonitor(
+				client=client,
+				figi=await share_ticker_to_figi(client, "SBER"),
+				type="share",
+				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
+				period=6,
+				lots=1,
+				allow_selling=True,
+				load_regime=True,
+				band_atr_mult=Decimal("0.5")
+			)
+		)
+
 		# order_monitor.add_instrument(
 		# 	InstrumentMonitor(
 		# 		client=client,

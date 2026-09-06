@@ -79,7 +79,7 @@ def _fmt_signed(d):
 	return f"{d:+,.2f}".replace(",", " ")
 
 
-MAX_OPS_ROWS = 6
+MAX_OPS_ROWS = 18
 
 
 def build_operation_list(operations):
@@ -107,6 +107,7 @@ def build_operation_list(operations):
 	height = rows + 3 if operations else 3
 	return Panel(table, title="Operations", border_style="grey53", height=height)
 
+
 def build_portfolio(balance, positions):
 	"""balance: Decimal; positions: list of dicts with ticker/lots/avg/current/profit/stop."""
 	table = Table.grid(expand=True, padding=(0, 1))
@@ -132,7 +133,7 @@ def build_portfolio(balance, positions):
 	balance_line.append("Balance: ", style="bold")
 	balance_line.append(_fmt(balance) + " RUB", style="bold green")
 
-	return Panel(Group(balance_line, table), title="Portfolio", border_style="cyan", height=7)
+	return Panel(Group(balance_line, table), title="Portfolio", border_style="cyan", height=10)
 
 
 def build_header(n_instruments):
@@ -155,7 +156,7 @@ def build_dashboard(instruments, balance, positions, operations, status=None, pr
 		Layout(name="header", size=1),
 		Layout(name="grid", size=row_count * CELL_HEIGHT),
 		Layout(name="op_list", size=ops_height),
-		Layout(name="portfolio", size=7),
+		Layout(name="portfolio", size=10),
 		Layout(name="status", size=1),
 		Layout(name="command", size=1),
 	)
