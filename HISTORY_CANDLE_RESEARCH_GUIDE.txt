@@ -1,19 +1,140 @@
-1. Find candidates — daily scan over the year:
-history_candles_peak_inspect.py --tickers SBER
-→ read the top-N dates + the ready-made zoom commands.
-2. Check a peak is real/tradable — zoom to 1M and look at volume:
-... --interval 1M --raw --from <peak> --to <peak>
-→ a real peak has big volume across the sweep minutes; an artifact is a single low-volume flash.
-3. Pick the band width from data — 5M excursion profile (over the year, or narrow with --from/--to):
-... --interval 5M --profile
-→ read each row as: with a band of X%, the bracket fires N bars over D days/year, and when it fires the market runs max M% past it. Choose X where you like the fires/yr vs. %-collected trade-off.
-4. Verify the exact level on the candidate days — before trusting the bracket:
-... --interval 5M --side sell --band 0.5 --from <win> --to <win> (or --level 123.45)
-→ confirms the order would have fired and how far the price ran past it (profit left on the table / how much wider you could go).
+RESEARCH GUIDE: does a ticker fit the bracket strategy?
+=======================================================
+The live monitor (t_order_manager.py) rests a SELL at MA(6) + X% and a BUY at
+MA(6) - X% on 5M candles. A ticker "fits" only if, at some band width X:
+  (a) price reaches the band on both sides often enough to actually trade;
+  (b) each reach is a real multi-5M-candle sweep with elevated volume, not a
+      single low-volume flash (single-tick noise can't be trusted as a fill);
+  (c) price keeps running PAST the level once reached (headroom for widening);
+  (d) the swing clears costs: broker fee ~0.05%/leg (~0.1% round-trip), so
+      prefer swings >= ~0.3-0.5%, i.e. X in the 0.2-0.5% zone;
+  (e) the deep dips that would fill the BUY are not only regime-break crashes
+      (live buying is disabled in a regime break, so those events are wasted).
 
-Caveats to keep in mind while reading results:
-- The profile/level-test MA(6) matches the strategy only when you use --interval 5M (that's what t_order_manager.py brackets use).
-- The tool ignores strategy gates. Live, a BUY bracket only exists if trend_ok and no regime_break; a SELL only while not holding long. So "the level was reached" means the order would fire given those conditions — a peaked day in a downtrend may suppress the BUY side live.
-- Different tickers have very different excursion profiles (SAFE is ultra-quiet; shares are noisier), so run step 3 per ticker rather than copying SAFE's numbers.
-Then feed the chosen numbers into TICKER_SETTINGS in t_order_manager.py (deviation_percent, optional asymmetric sell_band_factor, band_atr_mult).
+Run every acceptance step with --interval 5M: that is the bar the strategy
+brackets actually rest against. Commands below use SAFE as the example; swap in
+the candidate ticker. A full-year 5M run takes ~40s (sandbox is server-bound);
+prefer --from/--to windows for quick iterations.
 
+SAFE BASELINE (measured, full year 2025-09 .. 2026-09, 5M, preceding SMA(6))
+----------------------------------------------------------------------------
+  UP   (HIGH pokes above the preceding MA)      DOWN (LOW pokes below it)
+   band        bars   days    max                band         bars   days    max
+   >0.15  %     146     53   +23.17%             <-0.15  %     186     70   -37.44%
+   >0.30  %      37     16   +23.17%             <-0.30  %      50     12   -37.44%
+   >0.50  %      23      7   +23.17%             <-0.50  %      30      7   -37.44%
+   >1.00  %      14      5   +23.17%             <-1.00  %      11      5   -37.44%
+   >2.00  %      10      4   +23.17%             <-2.00  %       1      1   -37.44%
+   >3.00  %       8      3   +23.17%             <-3.00  %       1      1   -37.44%
+   >5.00  %       4      2   +23.17%             <-5.00  %       1      1   -37.44%
+   >10.00 %       2      1   +23.17%             <-10.00 %       1      1   -37.44%
+   >20.00 %       2      1   +23.17%             <-20.00 %       1      1   -37.44%
+
+Read a row as: "with a band of X%, the bracket fires N 5M bars over D days/year
+and the farthest single candle strayed M% past the MA". SAFE's tradable zone is
+the 0.3-0.5% band: tens of fires/year on each side, each a real sweep. The huge
+maxima (+23%/-37%) are single blow-off/crash days, NOT typical tradable events.
+
+REFERENCE EVENT (peak sweep, 2025-10-20): resting SELL at 16.60 would have
+filled on 4 consecutive 5M candles; the market ran +12.0% avg / +20.5% max PAST
+the level before reverting. That past-the-level run is the reason a wider band
+(or asymmetric sell_band_factor) collects more.
+
+RESEARCH RUNBOOK FOR A CANDIDATE TICKER
+---------------------------------------
+Phase A - coarse gate (fast: D + 30M). Stop early if the ticker has no structure.
+  1. history_candles_peak_inspect.py --tickers T --interval D --top 15
+     -> biggest daily moves. If the largest outliers are < ~0.5%, the ticker is
+        too flat for a 5M MA-bracket strategy -> reject.
+  2. history_candles_peak_inspect.py --tickers T --interval 30M --profile --bands "0.15 0.5 1 2"
+     -> both sides? If UP or DOWN shows ~0 pokes past 0.5% on 30M, reject.
+
+Phase B - acceptance on the strategy time frame (full-year 5M, ~40s).
+  3. history_candles_peak_inspect.py --tickers T --interval 5M --profile
+     -> compare both tables to the SAFE baseline above. Requirement: BOTH sides
+        have real activity at 0.3-0.5% (SAFE: ~37/16 up, ~50/12 down at 0.3%;
+        ~23/7 up, ~30/7 down at 0.5%). One-sided tickers fit half the strategy.
+     -> pick X so each side fires roughly 10-60 days/year. For SAFE X ~ 0.3-0.5%.
+  4. Verify the chosen band on the actual spike days found in step 1:
+     history_candles_peak_inspect.py --tickers T --interval 5M --side sell --band X --from <d0> --to <d1>
+     ... and the same with --side buy for a crash day.
+     -> confirms the bracket would have fired, and records how far price ran
+        past X (avg/median/max). Use that to set deviation_percent and the
+        asymmetric sell_band_factor / buy_band_factor in ticker_settings.json.
+
+Phase C - noise vs sweep. The tool counts candles/bars, which cannot tell a
+          real sweep from a one-candle wick. Verify by zooming with --raw (see
+          "USING --raw (ZOOM) PROPERLY" below) on the events you intend to trust.
+  5. Take the exact fire rows from the step-4 band test (they carry precise
+     datetime + volume) and zoom the strongest one on each side:
+     history_candles_peak_inspect.py --tickers T --interval 1M --raw \
+         --from "<day> <HH:MM>" --to "<day> <HH:MM>"
+  6. Repeat for the top 3-5 UP events AND top 3-5 DOWN events. If most "fires"
+     on either side are 1-candle wicks or open-gap days, that side is noise ->
+     don't widen the band into it, or reject the ticker.
+
+USING --raw (ZOOM) PROPERLY
+---------------------------
+WHEN to zoom:
+  * Phase C of every candidate, on both sides. Fires/yr counts alone are not
+    enough: they can look fine while the real character is wicks (see below).
+  * Whenever a D-scan day ranks as a big "peak". A daily deviation is measured
+    against that day's own SMA, so a day that gap-opens at its high (then
+    drifts) ranks top even though nothing moves intraday - and a resting
+    bracket measured off the intraday MA(6) has nothing real to fill there.
+  * To zoom the EXACT fire, take its time from the band-test matched-candle
+    table instead of guessing from the daily candle.
+HOW to zoom:
+  * Use 1M and a tight time window so the output stays readable:
+    history_candles_peak_inspect.py --tickers T --interval 1M --raw \
+        --from "<day> <HH:MM>" --to "<day> <HH:MM>"
+    (time-of-day in --from/--to is supported; --interval 5M for a wide view.)
+  * Compare the move-minutes' volume with the ticker's own typical 1M volume.
+    A real event shows volume an order of magnitude or more above median.
+  * Count the consecutive candles that push price through your level.
+READ the result - REAL vs ARTIFACT:
+  * REAL sweep  : several consecutive 1M/5M candles through the level, minute
+                  volume 10-100x the ticker median, price keeps running past
+                  the level. Example (TMOS@ 2026-07-24 10:26-10:40): price
+                  5.23->5.38, per-minute volume 1.5M/12.9M/6.4M/12.2M/5.1M vs
+                  ~15k median - a resting SELL at ~5.31-5.33 fills on real tape.
+  * ARTIFACT 1 - single-candle wick: one candle pokes through the level on
+                  near-median volume and the close snaps back. Example (TMOS@
+                  2026-03-23 07:00): 6.83 open / 7.00 high / 6.32 low / 6.77
+                  close on modest volume - a BUY at -1.5% fills on the wick and
+                  can stop out before the bounce.
+  * ARTIFACT 2 - open-gap day: the whole move printed at the session open
+                  (open = high/low, then drift). Example (TMOS@ 2026-07-21):
+                  opened 5.28 at the day's high, intraday up-pokes reached only
+                  ~+0.8%, so no real intraday sweep existed above the MA.
+Rule: only events that are REAL sweeps on BOTH sides count toward the pass
+decision; if a side's fires are mostly ARTIFACTS, that side's bracket will fill
+on noise, churn fees, and stop out - reduce that side's width or reject.
+
+Phase D - regime sanity (live regime guard suppresses BUY during a regime break).
+  7. For the deepest DOWN events, check whether they are part of a sustained
+     crash (look at the D scan around those dates). SAFE's -37% dip (2025-10-30)
+     is exactly such a regime-break day -> live it would NOT have bought. Such
+     days inflate the DOWN count and must be discounted when judging the BUY side.
+
+DECISION
+--------
+Pass when, at the chosen X, B/C/D land in SAFE's ballpark (fires/yr on both
+sides, multi-candle high-volume sweeps, non-trivial run past the level).
+Then add the ticker to ticker_settings.json:
+  deviation_percent = X          (0.0025-0.005 = 0.25-0.5%)
+  sell_band_factor / buy_band_factor from the past-the-level asymmetry measured
+  allow_selling / allow_buying per your intent for that instrument
+Start it at 1 lot and watch for a few live days before trusting the brackets.
+
+CAVEATS
+-------
+- SAFE is ultra-quiet at the 5M scale; ordinary shares are noisier. Judge each
+  ticker against its own Phase B/C evidence, using SAFE as the shape reference,
+  not as an absolute volume benchmark.
+- The tool ignores strategy gates: a peaked day in a downtrend may still show a
+  BUY fill that live would never have been placed (regime_break), and a SELL is
+  only live while flat/long. Discount those.
+- Deep one-day crashes skew the DOWN table (one -37% bar); they are not "X% dips
+  every year", they are one regime event. Re-run with --from/--to excluding the
+  crash day to see the real dip cadence.
