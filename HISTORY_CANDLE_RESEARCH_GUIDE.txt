@@ -1,0 +1,19 @@
+1. Find candidates — daily scan over the year:
+history_candles_peak_inspect.py --tickers SBER
+→ read the top-N dates + the ready-made zoom commands.
+2. Check a peak is real/tradable — zoom to 1M and look at volume:
+... --interval 1M --raw --from <peak> --to <peak>
+→ a real peak has big volume across the sweep minutes; an artifact is a single low-volume flash.
+3. Pick the band width from data — 5M excursion profile (over the year, or narrow with --from/--to):
+... --interval 5M --profile
+→ read each row as: with a band of X%, the bracket fires N bars over D days/year, and when it fires the market runs max M% past it. Choose X where you like the fires/yr vs. %-collected trade-off.
+4. Verify the exact level on the candidate days — before trusting the bracket:
+... --interval 5M --side sell --band 0.5 --from <win> --to <win> (or --level 123.45)
+→ confirms the order would have fired and how far the price ran past it (profit left on the table / how much wider you could go).
+
+Caveats to keep in mind while reading results:
+- The profile/level-test MA(6) matches the strategy only when you use --interval 5M (that's what t_order_manager.py brackets use).
+- The tool ignores strategy gates. Live, a BUY bracket only exists if trend_ok and no regime_break; a SELL only while not holding long. So "the level was reached" means the order would fire given those conditions — a peaked day in a downtrend may suppress the BUY side live.
+- Different tickers have very different excursion profiles (SAFE is ultra-quiet; shares are noisier), so run step 3 per ticker rather than copying SAFE's numbers.
+Then feed the chosen numbers into TICKER_SETTINGS in t_order_manager.py (deviation_percent, optional asymmetric sell_band_factor, band_atr_mult).
+

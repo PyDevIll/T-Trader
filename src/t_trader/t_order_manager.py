@@ -106,34 +106,98 @@ def _operation_view(op):
 
 
 # ---------------------------------------------------------------------------
-# Per-ticker strategy settings, merged over InstrumentMonitor defaults.
-#
-# Keys are InstrumentMonitor attribute names:
-#   deviation_percent   base bracket width as a fraction of MA (0.0015 = 0.15%)
-#   band_atr_mult       ATR-scaled width multiplier (0 = off; max(base, mult*ATR/MA))
-#   sell_band_factor    multiply the (SELL side) band width by this (1 = symmetric).
-#                       Use >1 to sell into peaks wider than you buy dips.
-#   buy_band_factor     multiply the BUY side band width by this.
+# Per-ticker settings live in ticker_settings.json next to the repo root. The
+# file is the source of truth for what the monitor boots: every top-level key
+# is a ticker the OrderMonitor starts watching, its value is that ticker's
+# InstrumentMonitor config. Recognized keys (any may be omitted -> defaults):
+#   type                "etf" | "share"  (also selects the ticker->figi lookup)
+#   candle_interval     "1M" "5M" "15M" "30M" "H" "2H" "4H" "D" (default "5M")
+#   period              candles used for the moving average (default 6)
+#   lots                order/position size (default 1)
+#   allow_buying        allow the BUY bracket (default true)
+#   allow_selling       allow the SELL bracket (default true)
+#   load_regime         apply the regime guard before buying (default true)
+#   band_atr_mult       ATR-scaled width multiplier (0 = off)
 #   hard_stop_dev_k     hard stop distance in band-widths beyond avg entry
-#   lots                order/position size
+#   deviation_percent   base bracket width as a fraction of MA (0.0015 = 0.15%)
+#   sell_band_factor    widen/narrow the SELL bracket vs the BUY one (1 = equal)
+#   buy_band_factor     widen/narrow the BUY bracket vs the SELL one (1 = equal)
 #
-# A ticker without an entry uses the plain defaults. Uncomment / edit freely;
-# pick widths from the excursion profile tool (history_candles_peak_inspect.py
-# --profile): it reports how often 5M prices move more than X% past the MA(6).
+# Tickers WITHOUT a file entry keep the plain InstrumentMonitor defaults and are
+# only watchable via the interactive "add TICKER" command. reload_ticker_settings()
+# populates TICKER_SETTINGS at boot. Pick widths from the excursion profile tool
+# (history_candles_peak_inspect.py --profile): it reports how often 5M prices
+# move more than X% past the MA(6).
 # ---------------------------------------------------------------------------
-TICKER_SETTINGS = {
-	# money-market ETF, very quiet: skip sub-noise churn but keep catching dips
-	# "SAFE": {
-	# 	"deviation_percent": Decimal("0.0015"),
-	# 	"sell_band_factor": Decimal("2"),	  # sell peaks twice as wide
-	# 	"band_atr_mult": Decimal("0.5"),
-	# 	"hard_stop_dev_k": 2,
-	# },
+TICKER_SETTINGS_FILE = "ticker_settings.json"
+
+TICKER_SETTINGS = {}  # {ticker: normalized InstrumentMonitor config}
+
+_CANDLE_INTERVAL_BY_NAME = {
+	"1M": CandleInterval.CANDLE_INTERVAL_1_MIN,
+	"5M": CandleInterval.CANDLE_INTERVAL_5_MIN,
+	"15M": CandleInterval.CANDLE_INTERVAL_15_MIN,
+	"30M": CandleInterval.CANDLE_INTERVAL_30_MIN,
+	"H": CandleInterval.CANDLE_INTERVAL_HOUR,
+	"2H": CandleInterval.CANDLE_INTERVAL_2_HOUR,
+	"4H": CandleInterval.CANDLE_INTERVAL_4_HOUR,
+	"D": CandleInterval.CANDLE_INTERVAL_DAY,
 }
+
+_DECIMAL_FIELDS = {"deviation_percent", "band_atr_mult", "sell_band_factor", "buy_band_factor"}
+_INT_FIELDS = {"lots", "period", "hard_stop_dev_k"}
+_BOOL_FIELDS = {"allow_buying", "allow_selling", "load_regime"}
+
+
+def _normalize_entry(raw_entry):
+	"""Convert raw JSON values into the types InstrumentMonitor expects."""
+	entry = {}
+	for name, value in raw_entry.items():
+		if name in _DECIMAL_FIELDS:
+			entry[name] = Decimal(str(value))
+		elif name in _INT_FIELDS:
+			entry[name] = int(value)
+		elif name in _BOOL_FIELDS:
+			entry[name] = bool(value)
+		elif name == "candle_interval" and isinstance(value, str):
+			try:
+				entry[name] = _CANDLE_INTERVAL_BY_NAME[value.upper()]
+			except KeyError:
+				raise ValueError(
+					f"Unknown candle_interval {value!r} in ticker_settings.json "
+					f"(use one of {sorted(_CANDLE_INTERVAL_BY_NAME)})")
+		else:
+			entry[name] = value
+	return entry
+
+
+def load_ticker_settings(path=None):
+	"""Read ticker_settings.json and return {TICKER: normalized config}.
+
+	The file decides which tickers the monitor boots with. Returns {} when the
+	file is absent so an unconfigured checkout keeps working (no instruments).
+	Raises on malformed JSON / bad values so config errors are visible at boot.
+	"""
+	path = path or TICKER_SETTINGS_FILE
+	try:
+		with open(path, encoding="utf-8") as f:
+			raw = json.load(f)
+	except FileNotFoundError:
+		return {}
+	if not isinstance(raw, dict):
+		raise ValueError(f"{path}: top level must be a JSON object of tickers")
+	return {str(t).upper(): _normalize_entry(entry) for t, entry in raw.items()}
+
+
+def reload_ticker_settings(path=None):
+	"""(Re)load ticker_settings.json into the module-global TICKER_SETTINGS."""
+	global TICKER_SETTINGS
+	TICKER_SETTINGS = load_ticker_settings(path)
+	return TICKER_SETTINGS
 
 
 def apply_ticker_settings(instrument_monitor, ticker):
-	"""Overlay TICKER_SETTINGS for `ticker` onto an InstrumentMonitor instance."""
+	"""Overlay the ticker_settings.json entry for `ticker` onto an InstrumentMonitor."""
 	overrides = TICKER_SETTINGS.get(str(ticker).upper())
 	if not overrides:
 		return
@@ -590,25 +654,72 @@ class OrderMonitor(StreamMonitor):
 		return await share_ticker_to_figi(self.client, ticker, verbose=False), "share"
 
 
+	async def _build_instrument(self, ticker):
+		"""Resolve TICKER and build its InstrumentMonitor.
+
+		Uses the ticker_settings.json entry when one exists (asset type selects
+		the ticker->figi lookup, flags/widths are constructor args); otherwise
+		falls back to the plain monitor defaults. Raises LookupError when the
+		ticker cannot be found."""
+		ticker = ticker.upper()
+		cfg = TICKER_SETTINGS.get(ticker, {})
+		asset_type = cfg.get("type")
+		if asset_type == "etf":
+			figi = await etf_ticker_to_figi(self.client, ticker, verbose=False)
+		elif asset_type == "share":
+			figi = await share_ticker_to_figi(self.client, ticker, verbose=False)
+		else:
+			figi, asset_type = await self._resolve_figi(ticker)
+		if not figi:
+			raise LookupError(f"Ticker {ticker} not found")
+		instrument = InstrumentMonitor(
+			client=self.client,
+			figi=figi,
+			type=asset_type,
+			candle_interval=cfg.get("candle_interval", CandleInterval.CANDLE_INTERVAL_5_MIN),
+			period=int(cfg.get("period", 6)),
+			lots=int(cfg.get("lots", 1)),
+			allow_buying=cfg.get("allow_buying", True),
+			allow_selling=cfg.get("allow_selling", True),
+			load_regime=cfg.get("load_regime", True),
+			band_atr_mult=cfg.get("band_atr_mult", Decimal("0.5")),
+			hard_stop_dev_k=int(cfg.get("hard_stop_dev_k", 2)),
+			deviation_percent=cfg.get("deviation_percent", Decimal("0.0015")),
+			sell_band_factor=cfg.get("sell_band_factor", Decimal(1)),
+			buy_band_factor=cfg.get("buy_band_factor", Decimal(1)),
+		)
+		return figi, instrument
+
+
+	async def load_instruments_from_settings(self):
+		"""Add every ticker listed in ticker_settings.json.
+
+		The settings file is the boot source of truth: this is how the monitor
+		decides which instruments to watch, instead of a hardcoded list."""
+		for ticker in TICKER_SETTINGS:
+			try:
+				figi, instrument = await self._build_instrument(ticker)
+			except LookupError as e:
+				self.status = str(e)
+				log(str(e))
+				continue
+			if figi in self.instrument_list_by_figi:
+				continue
+			self.add_instrument(instrument, ticker=ticker)
+			log(f"Loaded {ticker} from {TICKER_SETTINGS_FILE}")
+		return len(self.instrument_list_by_figi)
+
+
 	async def add_ticker(self, ticker):
 		ticker = ticker.upper()
-		figi, type_ = await self._resolve_figi(ticker)
-		if not figi:
-			self.status = f"Ticker {ticker} not found"
+		try:
+			figi, instrument = await self._build_instrument(ticker)
+		except LookupError as e:
+			self.status = str(e)
 			return
 		if figi in self.instrument_list_by_figi:
 			self.status = f"{ticker} is already in the monitor"
 			return
-		instrument = InstrumentMonitor(
-			client=self.client,
-			figi=figi,
-			type=type_,
-			candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-			period=6,
-			lots=1,
-			load_regime=True,
-			band_atr_mult=Decimal("0.5")
-		)
 		self.add_instrument(instrument, ticker=ticker)
 		try:
 			await self._init_single(instrument)
@@ -1089,107 +1200,18 @@ class OrderMonitor(StreamMonitor):
 
 async def test_order_monitor():
 	load_dotenv()
+	# ticker_settings.json decides which tickers (and their settings) to boot
+	settings = reload_ticker_settings()
+	if not settings:
+		log("No tickers in ticker_settings.json - booting with an empty monitor "
+			"(use the interactive \"add TICKER\" command at runtime).")
 	async with AsyncSandboxClient(os.environ["T_INVEST_TOKEN_SANDBOX"]) as client:
 		account_manager = await AccountManagerSandbox(client).connect()
 		order_manager = OrderManagerSandbox(client, account_manager)
 		order_monitor = OrderMonitor(client, order_manager)
-		order_monitor.add_instrument(
-			InstrumentMonitor(
-				client=client,
-				figi=await etf_ticker_to_figi(client, "TMON@"),
-				type="etf",
-				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-				period=6,
-				lots=1,
-				allow_selling=False,
-				load_regime=True,
-				band_atr_mult=Decimal("0.5")
-			),
-			ticker="TMON@"
-		)
-		order_monitor.add_instrument(
-			InstrumentMonitor(
-				client=client,
-				figi=await etf_ticker_to_figi(client, "SAFE"),
-				type="etf",
-				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-				period=6,
-				lots=1,
-				allow_selling=False,
-				load_regime=True,
-				band_atr_mult=Decimal("0.5")
-			),
-			ticker="SAFE"
-		)
-		order_monitor.add_instrument(
-			InstrumentMonitor(
-				client=client,
-				figi=await etf_ticker_to_figi(client, "TMOS@"),
-				type="etf",
-				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-				period=6,
-				lots=1,
-				allow_selling=True,
-				load_regime=True,
-				band_atr_mult=Decimal("0.5")
-			),
-			ticker="TMOS@"
-		)
-		order_monitor.add_instrument(
-			InstrumentMonitor(
-				client=client,
-				figi=await etf_ticker_to_figi(client, "TGLD@"),
-				type="etf",
-				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-				period=6,
-				lots=1,
-				allow_selling=True,
-				load_regime=True,
-				band_atr_mult=Decimal("0.5")
-			),
-			ticker="TGLD@"
-		)
-		order_monitor.add_instrument(
-			InstrumentMonitor(
-				client=client,
-				figi=await share_ticker_to_figi(client, "MTSS"),
-				type="share",
-				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-				period=6,
-				lots=1,
-				allow_selling=True,
-				load_regime=True,
-				band_atr_mult=Decimal("0.5")
-			),
-			ticker="MTSS"
-		)
-		order_monitor.add_instrument(
-			InstrumentMonitor(
-				client=client,
-				figi=await share_ticker_to_figi(client, "SBER"),
-				type="share",
-				candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-				period=6,
-				lots=1,
-				allow_selling=True,
-				load_regime=True,
-				band_atr_mult=Decimal("0.5")
-			),
-			ticker="SBER"
-		)
-
-		# order_monitor.add_instrument(
-		# 	InstrumentMonitor(
-		# 		client=client,
-		# 		figi=await share_ticker_to_figi(client, "SBER"),
-		# 		type="share",
-		# 		candle_interval=CandleInterval.CANDLE_INTERVAL_5_MIN,
-		# 		period=6,
-		# 		lots=4
-		# 	)
-		# )
+		await order_monitor.load_instruments_from_settings()
+		order_monitor.status = f"Initializing {len(order_monitor.instrument_list_by_figi)} instrument(s) from {TICKER_SETTINGS_FILE}..."
 		order_monitor.start_dashboard()
-		order_monitor.status = "Initializing instruments..."
 		order_monitor.refresh()
 		order_monitor.portfolio_task = asyncio.create_task(order_monitor._portfolio_loop())
 		order_monitor.input_task = asyncio.create_task(order_monitor.get_user_input())
