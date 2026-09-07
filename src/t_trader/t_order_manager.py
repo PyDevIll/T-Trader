@@ -105,9 +105,48 @@ def _operation_view(op):
 	}
 
 
+# ---------------------------------------------------------------------------
+# Per-ticker strategy settings, merged over InstrumentMonitor defaults.
+#
+# Keys are InstrumentMonitor attribute names:
+#   deviation_percent   base bracket width as a fraction of MA (0.0015 = 0.15%)
+#   band_atr_mult       ATR-scaled width multiplier (0 = off; max(base, mult*ATR/MA))
+#   sell_band_factor    multiply the (SELL side) band width by this (1 = symmetric).
+#                       Use >1 to sell into peaks wider than you buy dips.
+#   buy_band_factor     multiply the BUY side band width by this.
+#   hard_stop_dev_k     hard stop distance in band-widths beyond avg entry
+#   lots                order/position size
+#
+# A ticker without an entry uses the plain defaults. Uncomment / edit freely;
+# pick widths from the excursion profile tool (history_candles_peak_inspect.py
+# --profile): it reports how often 5M prices move more than X% past the MA(6).
+# ---------------------------------------------------------------------------
+TICKER_SETTINGS = {
+	# money-market ETF, very quiet: skip sub-noise churn but keep catching dips
+	# "SAFE": {
+	# 	"deviation_percent": Decimal("0.0015"),
+	# 	"sell_band_factor": Decimal("2"),	  # sell peaks twice as wide
+	# 	"band_atr_mult": Decimal("0.5"),
+	# 	"hard_stop_dev_k": 2,
+	# },
+}
+
+
+def apply_ticker_settings(instrument_monitor, ticker):
+	"""Overlay TICKER_SETTINGS for `ticker` onto an InstrumentMonitor instance."""
+	overrides = TICKER_SETTINGS.get(str(ticker).upper())
+	if not overrides:
+		return
+	for name, value in overrides.items():
+		if hasattr(instrument_monitor, name):
+			setattr(instrument_monitor, name, value)
+
+
 class InstrumentMonitor:
 	def __init__(self, client, figi, type, candle_interval, period, lots=1, allow_buying=True, allow_selling=True,
-				 load_regime=False, band_atr_mult=Decimal(0), hard_stop_dev_k=2):
+				 load_regime=False, band_atr_mult=Decimal(0), hard_stop_dev_k=2,
+				 deviation_percent=Decimal("0.0015"),
+				 sell_band_factor=Decimal(1), buy_band_factor=Decimal(1)):
 		self.client = client
 		self.figi = figi
 		self.type = type
@@ -118,7 +157,11 @@ class InstrumentMonitor:
 		self.candle_history = []
 		self.min_price_increment = None
 		self.ma = None
-		self.deviation_percent = Decimal(0.0015) # 0.15%
+		self.deviation_percent = deviation_percent
+		#	 asymmetric bands: the SELL/BUY bracket width is deviation*factor,
+		#	 so a ticker can sell peaks wider than it buys dips (or vice versa)
+		self.sell_band_factor = sell_band_factor
+		self.buy_band_factor = buy_band_factor
 		self.lots = lots
 		self.hi_order = None
 		self.lo_order = None
@@ -265,14 +308,19 @@ class InstrumentMonitor:
 
 
 	# moved to InstrumentMonitor
-	def band_deviation(self):
-		"""Deviation band width as a fraction of MA (base 0.15%, ATR-scaled when enabled)."""
+	def band_deviation(self, side_factor=Decimal(1)):
+		"""Deviation band width as a fraction of MA.
+
+		Base is deviation_percent (default 0.15%), ATR-scaled when enabled.
+		side_factor lets SELL and BUY brackets use different widths
+		(see sell_band_factor / buy_band_factor / TICKER_SETTINGS).
+		"""
 		deviation = self.deviation_percent
 		if self.band_atr_mult:
 			atr = self.ATR()
 			if atr and self.ma:
 				deviation = max(deviation, self.band_atr_mult * atr / self.ma)
-		return deviation
+		return deviation * side_factor
 
 
 	# moved to InstrumentMonitor
@@ -281,10 +329,11 @@ class InstrumentMonitor:
 		# 	return
 
 		self.check_regime_break()
-		deviation = self.band_deviation()
+		sell_deviation = self.band_deviation(self.sell_band_factor)
+		buy_deviation = self.band_deviation(self.buy_band_factor)
 
 		if self.allow_selling and self.hold_side != "long":
-			sell_quotation = self.quantize(self.ma + self.ma * deviation)
+			sell_quotation = self.quantize(self.ma + self.ma * sell_deviation)
 			self.hi_order = await self._move_order(self.hi_order, sell_quotation, "SELL")
 			self.sell_limit = quotation_to_decimal(sell_quotation) if self.hi_order else None
 		elif self.hold_side == "long" and self.hi_order:
@@ -296,7 +345,7 @@ class InstrumentMonitor:
 			self.sell_limit = None
 
 		if self.allow_buying and self.trend_ok and not self.regime_break and self.hold_side != "short":
-			buy_quotation = self.quantize(self.ma - self.ma * deviation)
+			buy_quotation = self.quantize(self.ma - self.ma * buy_deviation)
 			self.lo_order = await self._move_order(self.lo_order, buy_quotation, "BUY")
 			self.buy_limit = quotation_to_decimal(buy_quotation) if self.lo_order else None
 		elif self.hold_side == "short" and self.lo_order:
@@ -431,8 +480,10 @@ class OrderMonitor(StreamMonitor):
 		...
 
 
-	def add_instrument(self, instrument_monitor):
+	def add_instrument(self, instrument_monitor, ticker=None):
 		instrument_monitor.order_manager = self.order_manager
+		if ticker:
+			apply_ticker_settings(instrument_monitor, ticker)
 		self.instrument_list_by_figi[instrument_monitor.figi] = instrument_monitor
 
 
@@ -558,7 +609,7 @@ class OrderMonitor(StreamMonitor):
 			load_regime=True,
 			band_atr_mult=Decimal("0.5")
 		)
-		self.add_instrument(instrument)
+		self.add_instrument(instrument, ticker=ticker)
 		try:
 			await self._init_single(instrument)
 		except Exception as e:
@@ -1053,7 +1104,8 @@ async def test_order_monitor():
 				allow_selling=False,
 				load_regime=True,
 				band_atr_mult=Decimal("0.5")
-			)
+			),
+			ticker="TMON@"
 		)
 		order_monitor.add_instrument(
 			InstrumentMonitor(
@@ -1066,7 +1118,8 @@ async def test_order_monitor():
 				allow_selling=False,
 				load_regime=True,
 				band_atr_mult=Decimal("0.5")
-			)
+			),
+			ticker="SAFE"
 		)
 		order_monitor.add_instrument(
 			InstrumentMonitor(
@@ -1079,7 +1132,8 @@ async def test_order_monitor():
 				allow_selling=True,
 				load_regime=True,
 				band_atr_mult=Decimal("0.5")
-			)
+			),
+			ticker="TMOS@"
 		)
 		order_monitor.add_instrument(
 			InstrumentMonitor(
@@ -1092,7 +1146,8 @@ async def test_order_monitor():
 				allow_selling=True,
 				load_regime=True,
 				band_atr_mult=Decimal("0.5")
-			)
+			),
+			ticker="TGLD@"
 		)
 		order_monitor.add_instrument(
 			InstrumentMonitor(
@@ -1105,7 +1160,8 @@ async def test_order_monitor():
 				allow_selling=True,
 				load_regime=True,
 				band_atr_mult=Decimal("0.5")
-			)
+			),
+			ticker="MTSS"
 		)
 		order_monitor.add_instrument(
 			InstrumentMonitor(
@@ -1118,7 +1174,8 @@ async def test_order_monitor():
 				allow_selling=True,
 				load_regime=True,
 				band_atr_mult=Decimal("0.5")
-			)
+			),
+			ticker="SBER"
 		)
 
 		# order_monitor.add_instrument(
