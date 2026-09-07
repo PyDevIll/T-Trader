@@ -35,6 +35,7 @@ from t_tech.invest.schemas import (
 	CandleSource,
 	InstrumentStatus,
 	InstrumentIdType,
+	OperationState,
 	OperationType,
 	TradeInstrument,
 	CandleInstrument,
@@ -69,9 +70,39 @@ from t_regime import load_regime_profile
 from t_dashboard import build_dashboard
 
 LOG_FILE = "t_trader.log"
+MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MB
+LOG_BACKUP_COUNT = 5
+
+
+def _rotate_log_if_needed():
+	"""Roll t_trader.log over once it exceeds MAX_LOG_BYTES.
+
+	The current file becomes t_trader.log.1 and older backups shift up to
+	LOG_BACKUP_COUNT, so the log never grows past ~10MB + one message."""
+	try:
+		if os.path.getsize(LOG_FILE) <= MAX_LOG_BYTES:
+			return
+	except OSError:
+		return
+	stale = f"{LOG_FILE}.{LOG_BACKUP_COUNT}"
+	try:
+		os.remove(stale)
+	except OSError:
+		pass
+	for i in range(LOG_BACKUP_COUNT - 1, 0, -1):
+		older = f"{LOG_FILE}.{i}"
+		try:
+			os.rename(older, f"{LOG_FILE}.{i + 1}")
+		except OSError:
+			pass
+	try:
+		os.rename(LOG_FILE, f"{LOG_FILE}.1")
+	except OSError:
+		pass
 
 
 def log(message):
+	_rotate_log_if_needed()
 	with open(LOG_FILE, "a", encoding="utf-8") as f:
 		f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
 
@@ -90,6 +121,19 @@ _OPERATION_SIDES = {
 	"OPERATION_TYPE_BROKER_FEE": "FEE",
 	"OPERATION_TYPE_INPUT": "PAYIN",
 	"OPERATION_TYPE_OUTPUT": "PAYOUT",
+}
+
+# Only fills and the fee they incur count as trade activity. Everything else
+# (INPUT/OUTPUT transfers, coupons, taxes, ...) and especially the sandbox rows
+# that mirror resting-order placements/moves are filtered out of the panel.
+_REAL_TRADE_OPERATION_TYPES = {
+	OperationType.OPERATION_TYPE_BUY,
+	OperationType.OPERATION_TYPE_SELL,
+	OperationType.OPERATION_TYPE_BUY_MARGIN,
+	OperationType.OPERATION_TYPE_SELL_MARGIN,
+	OperationType.OPERATION_TYPE_DELIVERY_BUY,
+	OperationType.OPERATION_TYPE_DELIVERY_SELL,
+	OperationType.OPERATION_TYPE_BROKER_FEE,
 }
 
 
@@ -852,6 +896,19 @@ class OrderMonitor(StreamMonitor):
 							   status=self.status, prompt=self.reader.buffer if self.reader else "")
 
 
+	def _is_real_operation(self, op):
+		"""A row belongs to a real trade only if it executed AND is a fill or fee.
+
+		Sandbox records every resting-order attempt (place / move) as a BUY/SELL
+		row, so cancelled rows flood the feed. Real fills are always EXECUTED and
+		are followed by their BROKER_FEE. Pure cash transfers (pay-in/out) are not
+		trade related and are dropped too."""
+		return (
+			op.state == OperationState.OPERATION_STATE_EXECUTED
+			and op.operation_type in _REAL_TRADE_OPERATION_TYPES
+		)
+
+
 	async def refresh_operations(self, days=7):
 		try:
 			operations = await self.account_manager.get_account_operations(
@@ -859,7 +916,7 @@ class OrderMonitor(StreamMonitor):
 				to=now()
 			)
 			operations = sorted(operations, key=lambda op: op.date, reverse=True)
-			self.operations = [_operation_view(op) for op in operations]
+			self.operations = [_operation_view(op) for op in operations if self._is_real_operation(op)]
 		except Exception as e:
 			log(f"Operations refresh failed: {e}")
 
