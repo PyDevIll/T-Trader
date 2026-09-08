@@ -5,12 +5,12 @@
     "period": 6,
     "lots": 1,
     "allow_buying": true,
-    "allow_selling": false,
+    "allow_selling": true,
     "load_regime": true,
     "band_atr_mult": 0.5,
     "hard_stop_dev_k": 2,
     "deviation_percent": 0.0015,
-    "sell_band_factor": 1,
+    "sell_band_factor": 2,
     "buy_band_factor": 1
   },
   "TMOS@": {

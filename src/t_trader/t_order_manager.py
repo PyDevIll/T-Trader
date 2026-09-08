@@ -329,7 +329,7 @@ class InstrumentMonitor:
 		try:
 			self.bid = orderbook.bids[0].price
 			self.ask = orderbook.asks[0].price
-			log(f"{ticker_figi.ticker(self.figi)} bid/ask = {quotation_to_decimal(self.bid)} / {quotation_to_decimal(self.ask)}")
+#			log(f"{ticker_figi.ticker(self.figi)} bid/ask = {quotation_to_decimal(self.bid)} / {quotation_to_decimal(self.ask)}")
 		except Exception as e:
 			log(f"Cannot update bid/ask for {ticker_figi.ticker(self.figi)}: {e}")
 

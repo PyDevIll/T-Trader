@@ -1,0 +1,31 @@
+# Secrets / credentials - never baked into an image layer.
+.env
+**/.env
+invest_token
+
+# Runtime state written next to the repo root by t_order_manager.
+t_trader.log
+t_trader.log.*
+ticker_figi_cache.txt
+regime_cache/
+
+# VCS / tooling noise.
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+
+# Tests and research scripts are not needed inside the image.
+tests/
+llm_playground.py
+history_candles_peak_inspect.py
+regime.py
+
+# Docs kept out of the runtime image.
+README.md
+PROJECT_ARCH.md
+PROJECT_PLAN.md
+HISTORY_CANDLE_RESEARCH_GUIDE.txt

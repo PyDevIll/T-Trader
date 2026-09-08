@@ -1,0 +1,49 @@
+# t_order_manager on a remote server: always-on container you attach to.
+#
+#   docker compose up -d --build      # build + start detached
+#   docker compose attach             # dashboard / command console (Ctrl-C detaches, does NOT stop the container)
+#   docker compose logs -f            # stream what the dashboard is printing
+#   docker compose restart            # apply edits made to ticker_settings.json on the host
+#
+# The whole repo dir is bind-mounted at /app, so the container shares the host
+# copy of ticker_settings.json (edit on host, then `reload` inside) and writes
+# t_trader.log / ticker_figi_cache.txt straight back into the repo on the host.
+# Rebuild the image (docker compose build) only when pyproject.toml / poetry.lock change.
+
+services:
+  order-manager:
+    build:
+      context: .
+    image: t-trader:latest
+    container_name: t-trader-order-manager
+    restart: unless-stopped
+
+    env_file:
+      - .env          # must exist on the server; provides T_INVEST_TOKEN_SANDBOX
+    environment:
+      - TZ=Europe/Moscow
+      - PYTHONUNBUFFERED=1
+
+    # The app is an interactive console: it drives the terminal via termios and
+    # renders a Rich Live dashboard. Giving it a TTY keeps LineReader and the
+    # dashboard happy even while nobody is attached.
+    stdin_open: true
+    tty: true
+
+    working_dir: /app
+    command: ["python", "src/t_trader/t_order_manager.py"]
+
+    volumes:
+      - ./:/app
+
+    # 5 fps Live redraws are chatty in the json-file log driver.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+    stop_grace_period: 15s
+
+    # If the server is not amd64, uncomment and pick a platform:
+    # platform: linux/amd64
