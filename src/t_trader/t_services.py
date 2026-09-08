@@ -36,7 +36,12 @@ from t_tech.invest.schemas import (
 	TimeInForceType,
 	OrderExecutionReportStatus,
 	OrderIdType,
-	ReplaceOrderRequest
+	ReplaceOrderRequest,
+	StopOrderType,
+	StopOrderDirection,
+	StopOrderExpirationType,
+	StopOrderStatusOption,
+	ExchangeOrderType
 )
 from t_tech.invest.exceptions import AioRequestError
 import json
@@ -78,6 +83,7 @@ def instruments_by_filter(instruments, filter_dict):
 class ticker_figi_cache():
 	_ticker_to_figi = {}
 	_figi_to_ticker = {}
+	_type_by_ticker = {}
 
 	@classmethod
 	def init(cls):
@@ -89,6 +95,7 @@ class ticker_figi_cache():
 		else:
 			cls._ticker_to_figi = cache["ticker_to_figi"]
 			cls._figi_to_ticker = cache["figi_to_ticker"]
+			cls._type_by_ticker = cache.get("types", {})
 
 	@classmethod
 	def save(cls):
@@ -96,7 +103,8 @@ class ticker_figi_cache():
 		with open('ticker_figi_cache.txt', 'w') as f:
 			json.dump({
 				'ticker_to_figi': cls._ticker_to_figi,
-				'figi_to_ticker': cls._figi_to_ticker
+				'figi_to_ticker': cls._figi_to_ticker,
+				'types': cls._type_by_ticker
 			}, f)
 
 	@classmethod
@@ -108,31 +116,48 @@ class ticker_figi_cache():
 		return cls._figi_to_ticker[figi] if figi in cls._figi_to_ticker else None
 
 	@classmethod
-	def update(cls, ticker, figi):
+	def type(cls, ticker):
+		# cached asset class ("etf"/"share"); None for legacy cache entries
+		return cls._type_by_ticker.get(ticker)
+
+	@classmethod
+	def update(cls, ticker, figi, type_):
 		cls._ticker_to_figi[ticker] = figi
 		cls._figi_to_ticker[figi] = ticker
+		cls._type_by_ticker[ticker] = type_
 		cls.save()
 
 
-async def etf_ticker_to_figi(client, ticker):
-	if figi:=ticker_figi_cache.figi(ticker):
-		return figi
-
+async def etf_ticker_to_figi(client, ticker, verbose=True):
+	cached = ticker_figi_cache.figi(ticker)
+	cached_type = ticker_figi_cache.type(ticker)
+	if cached and cached_type == "etf":
+		return cached
+	if cached and cached_type is not None:
+		# cached under the other asset class: this is not an ETF
+		return None
+	# legacy/uncached entry: scan to confirm the real asset class
 	for etf in (await client.instruments.etfs()).instruments:
 		if etf.ticker == ticker:
-			print(f"For {ticker} figi = {etf.figi}")
-			ticker_figi_cache.update(ticker, etf.figi)
+			if verbose:
+				print(f"For {ticker} figi = {etf.figi}")
+			ticker_figi_cache.update(ticker, etf.figi, "etf")
 			return etf.figi
 
 
-async def share_ticker_to_figi(client, ticker):
-	if figi:=ticker_figi_cache.figi(ticker):
-		return figi
-
+async def share_ticker_to_figi(client, ticker, verbose=True):
+	cached = ticker_figi_cache.figi(ticker)
+	cached_type = ticker_figi_cache.type(ticker)
+	if cached and cached_type == "share":
+		return cached
+	if cached and cached_type is not None:
+		# cached under the other asset class: this is not a share
+		return None
 	for share in (await client.instruments.shares()).instruments:
 		if share.ticker == ticker:
-			print(f"For {ticker} figi = {share.figi}")
-			ticker_figi_cache.update(ticker, share.figi)
+			if verbose:
+				print(f"For {ticker} figi = {share.figi}")
+			ticker_figi_cache.update(ticker, share.figi, "share")
 			return share.figi
 
 
@@ -202,6 +227,11 @@ class AccountManagerSandbox():
 		return operations
 
 
+	async def get_account_operations(self, from_=None, to=None):
+		operations = (await self.client.sandbox.get_sandbox_operations(account_id=self.account.id, from_=from_, to=to)).operations
+		return operations
+
+
 	async def get_positions(self):
 		positions = (await self.client.sandbox.get_sandbox_portfolio(account_id=self.account.id)).positions
 		for p in positions:
@@ -212,6 +242,11 @@ class AccountManagerSandbox():
 				("[green]" if green_color else "[red]") + f"{profit:+.2f}[/] )"
 			)
 		return positions
+
+
+	async def get_portfolio_positions(self):
+		portfolio = await self.client.sandbox.get_sandbox_portfolio(account_id=self.account.id)
+		return portfolio.positions
 
 
 
@@ -242,7 +277,7 @@ class OrderManagerSandbox:
 			print(f"Cannot post order: {e.metadata.message}")
 			return None
 
-		inspect(post_order_response)
+		# inspect(post_order_response)
 		if post_order_response.execution_report_status != OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_REJECTED:
 			print(f"Success! ({post_order_response.execution_report_status.name})")
 			return post_order_response.order_id
@@ -312,7 +347,49 @@ class OrderManagerSandbox:
 			order_id=order_id,
 			order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE
 		)
-		inspect(cancel_response.response_metadata)
+		# inspect(cancel_response.response_metadata)
+
+
+	async def cancel_order_silent(self, order_id):
+		await self.client.sandbox.cancel_sandbox_order(
+			account_id=self.account_id,
+			order_id=order_id,
+			order_id_type=OrderIdType.ORDER_ID_TYPE_EXCHANGE
+		)
+
+
+	async def get_active_stop_orders(self):
+		"""Silently returns active (resting) stop orders."""
+		response = await self.client.stop_orders.get_stop_orders(account_id=self.account_id)
+		return [so for so in response.stop_orders
+				if so.status == StopOrderStatusOption.STOP_ORDER_STATUS_ACTIVE]
+
+
+	async def post_stop_order(self, figi, stop_price_decimal, direction, lots,
+							  stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS):
+		"""Places a stop order (market upon trigger). Returns stop_order_id or None."""
+		try:
+			response = await self.client.stop_orders.post_stop_order(
+				figi=figi,
+				quantity=lots,
+				stop_price=decimal_to_quotation(stop_price_decimal),
+				direction=direction,
+				account_id=self.account_id,
+				expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+				stop_order_type=stop_order_type,
+				exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_MARKET,
+				order_id=str(uuid.uuid4()),
+			)
+		except AioRequestError:
+			return None
+		return response.stop_order_id
+
+
+	async def cancel_stop_order(self, stop_order_id):
+		await self.client.stop_orders.cancel_stop_order(
+			account_id=self.account_id,
+			stop_order_id=stop_order_id,
+		)
 
 
 	async def get_tradables_from(self, figi_list):

@@ -27,7 +27,7 @@ import json
 
 from src.t_trader.t_services import (
 	instruments_by_filter,
-	AccountManager,
+	AccountManagerSandbox,
 	OrderbookMonitor
 )
 from rich import print, inspect
@@ -75,7 +75,7 @@ def test_get_instruments():
 
 @pytest.mark.asyncio
 async def test_account_manager(client):
-	account_manager = await AccountManager(client).connect()
+	account_manager = await AccountManagerSandbox(client).connect()
 	assert account_manager
 	inspect(account_manager.account)
 
